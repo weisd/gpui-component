@@ -9,6 +9,7 @@ members = [
     "examples/input",
     "examples/window_title",
     "examples/dialog_overlay",
+    "examples/stock_chart",
 ]
 resolver = "2"
 
