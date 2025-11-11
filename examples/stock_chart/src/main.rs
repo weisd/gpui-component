@@ -31,6 +31,31 @@ fn format_amount(amount: f64) -> String {
     }
 }
 
+// 计算移动平均线（MA）
+fn calculate_ma<T, F>(data: &[T], period: usize, close_fn: F) -> Vec<Option<f64>>
+where
+    F: Fn(&T) -> f64,
+{
+    let mut ma_values = Vec::with_capacity(data.len());
+
+    for i in 0..data.len() {
+        if i < period - 1 {
+            // 数据不足，无法计算均线
+            ma_values.push(None);
+        } else {
+            // 计算period天的收盘价平均值
+            let sum: f64 = data[i.saturating_sub(period - 1)..=i]
+                .iter()
+                .map(|d| close_fn(d))
+                .sum();
+            let avg = sum / period as f64;
+            ma_values.push(Some(avg));
+        }
+    }
+
+    ma_values
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 struct StockData {
     date: String,
@@ -152,12 +177,28 @@ where
         let candle_width = (band_width * 0.7).max(4.0); // 蜡烛宽度为 band 的 70%，最小4像素
         let candle_x_offset = (band_width - candle_width) / 2.0;
 
-        // Y scale - 包含所有价格（high, low, open, close）
-        let all_prices: Vec<f64> = self
+        // 计算均线值（用于Y轴scale计算）
+        let ma5 = calculate_ma(&self.data, 5, |d| close_fn(d));
+        let ma10 = calculate_ma(&self.data, 10, |d| close_fn(d));
+        let ma20 = calculate_ma(&self.data, 20, |d| close_fn(d));
+        let ma30 = calculate_ma(&self.data, 30, |d| close_fn(d));
+        let ma60 = calculate_ma(&self.data, 60, |d| close_fn(d));
+        let ma120 = calculate_ma(&self.data, 120, |d| close_fn(d));
+        let ma250 = calculate_ma(&self.data, 250, |d| close_fn(d));
+
+        // Y scale - 包含所有价格（high, low, open, close）和均线值
+        let mut all_prices: Vec<f64> = self
             .data
             .iter()
             .flat_map(|d| vec![high_fn(d), low_fn(d), open_fn(d), close_fn(d)])
             .collect();
+
+        // 添加均线值到价格范围计算中
+        for ma_values in [&ma5, &ma10, &ma20, &ma30, &ma60, &ma120, &ma250] {
+            for ma_value in ma_values.iter().flatten() {
+                all_prices.push(*ma_value);
+            }
+        }
 
         // 找到最小和最大价格
         let min_price = all_prices.iter().copied().fold(f64::INFINITY, f64::min);
@@ -307,8 +348,52 @@ where
             .dash_array(&[px(4.), px(2.)])
             .paint(&bounds, window);
 
-        // 绘制蜡烛
+        // 绘制均线（在蜡烛之前绘制，这样蜡烛会覆盖均线）
+        // 均线值已在Y轴scale计算时计算过了
         let origin = bounds.origin;
+        // 使用指定的颜色
+        use gpui_component::Colorize;
+        let ma_colors = [
+            Hsla::parse_hex("#575756").unwrap(), // MA5 （深灰色）
+            Hsla::parse_hex("#e82bf6").unwrap(), // MA10 （紫色）
+            Hsla::parse_hex("#0000FF").unwrap(), // MA20 （蓝色）
+            Hsla::parse_hex("#aaa9a9").unwrap(), // MA30 （浅灰色）
+            Hsla::parse_hex("#640000").unwrap(), // MA60 （深绿色）
+            Hsla::parse_hex("#206f09").unwrap(), // MA120 （深绿色）
+            Hsla::parse_hex("#FFA500").unwrap(), // MA250 (橙色)
+        ];
+        let ma_data = [&ma5, &ma10, &ma20, &ma30, &ma60, &ma120, &ma250];
+
+        for (ma_values, &color) in ma_data.iter().zip(ma_colors.iter()) {
+            let mut line_builder = PathBuilder::stroke(px(1.0));
+            let mut has_points = false;
+
+            for (i, d) in self.data.iter().enumerate() {
+                if let Some(ma_value) = ma_values.get(i).and_then(|v| *v) {
+                    if let Some(x_tick) = x.tick(&x_fn(d)) {
+                        if let Some(ma_y_f32) = y.tick(&ma_value) {
+                            let ma_y = px(ma_y_f32);
+                            let point = origin_point(px(x_tick + band_width / 2.0), ma_y, origin);
+
+                            if !has_points {
+                                line_builder.move_to(point);
+                                has_points = true;
+                            } else {
+                                line_builder.line_to(point);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if has_points {
+                if let Ok(line_path) = line_builder.build() {
+                    window.paint_path(line_path, Background::from(color));
+                }
+            }
+        }
+
+        // 绘制蜡烛
         let success_color = cx.theme().success;
         let danger_color = cx.theme().danger;
 
@@ -881,14 +966,33 @@ impl Element for VolumeChart {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // 先绘制BarChart
-        <BarChart<StockData, String, f64> as Plot>::paint(&mut self.bar_chart, bounds, window, cx);
+        // 与主图K线图保持一致：减去Y轴标签宽度，确保X轴对齐
+        let total_width = bounds.size.width.as_f32();
+        let y_label_width = 50.0; // 与主图K线图一致
+        let chart_width = total_width - y_label_width; // 图表实际宽度（不包含Y轴标签区域）
+
+        // 创建一个调整后的bounds，使BarChart使用与主图相同的宽度
+        let adjusted_bounds = Bounds {
+            origin: bounds.origin,
+            size: gpui::Size {
+                width: px(chart_width),
+                height: bounds.size.height,
+            },
+        };
+
+        // 先绘制BarChart（使用调整后的bounds，确保X轴与主图对齐）
+        <BarChart<StockData, String, f64> as Plot>::paint(
+            &mut self.bar_chart,
+            adjusted_bounds,
+            window,
+            cx,
+        );
 
         // 扩展检测范围：检测鼠标是否在K线图或成交量图的X坐标范围内
         // 不仅检测成交量图bounds，还要检测K线图的X坐标范围，以便联动
         let mouse_pos = window.mouse_position();
         let origin = bounds.origin;
-        let width = bounds.size.width.as_f32();
+        let width = chart_width; // 使用与主图相同的宽度
         let height = bounds.size.height.as_f32();
 
         // 使用与K线图相同的X scale计算（确保竖线对齐）
@@ -1204,7 +1308,7 @@ impl Example {
         let http_client = cx.http_client().clone();
         let symbol = "AAPL";
         let url = format!(
-            "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range=3mo",
+            "https://query1.finance.yahoo.com/v8/finance/chart/{}?interval=1d&range=1y",
             symbol
         );
 
@@ -1247,7 +1351,7 @@ impl Example {
                             Err(e) => {
                                 eprintln!("获取股票数据失败: {}, 使用模拟数据", e);
                                 // 如果获取失败，使用模拟数据
-                                view.stock_data = generate_stock_data(60);
+                                view.stock_data = generate_stock_data(120);
                                 view.loading = false;
                             }
                         }
@@ -1395,7 +1499,10 @@ async fn fetch_stock_data_with_client(
             .min(lows.len())
             .min(closes.len());
 
-        for i in 0..len {
+        // 只取最新的120根K线
+        let start_idx = len.saturating_sub(120);
+
+        for i in start_idx..len {
             let timestamp = timestamps[i];
             let date = chrono::DateTime::from_timestamp(timestamp as i64, 0)
                 .unwrap_or_else(|| chrono::Utc::now());
