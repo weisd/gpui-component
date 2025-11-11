@@ -31,6 +31,95 @@ fn format_amount(amount: f64) -> String {
     }
 }
 
+// 计算指数移动平均线（EMA）
+fn calculate_ema<T, F>(data: &[T], period: usize, close_fn: F) -> Vec<Option<f64>>
+where
+    F: Fn(&T) -> f64,
+{
+    let mut ema_values = Vec::with_capacity(data.len());
+    let multiplier = 2.0 / (period as f64 + 1.0);
+
+    for i in 0..data.len() {
+        if i == 0 {
+            // 第一个值使用收盘价
+            ema_values.push(Some(close_fn(&data[i])));
+        } else if let Some(prev_ema) = ema_values[i - 1] {
+            // EMA = (收盘价 - 前一日EMA) * 乘数 + 前一日EMA
+            let close = close_fn(&data[i]);
+            let ema = (close - prev_ema) * multiplier + prev_ema;
+            ema_values.push(Some(ema));
+        } else {
+            ema_values.push(None);
+        }
+    }
+
+    ema_values
+}
+
+// 计算MACD指标
+struct MacdData {
+    dif: Vec<Option<f64>>,  // DIF线：EMA12 - EMA26
+    dea: Vec<Option<f64>>,  // DEA线：DIF的9日EMA
+    macd: Vec<Option<f64>>, // MACD柱：2 * (DIF - DEA)
+}
+
+fn calculate_macd<T, F>(data: &[T], close_fn: F) -> MacdData
+where
+    F: Fn(&T) -> f64,
+{
+    // 计算EMA12和EMA26
+    let ema12 = calculate_ema(data, 12, &close_fn);
+    let ema26 = calculate_ema(data, 26, &close_fn);
+
+    // 计算DIF = EMA12 - EMA26
+    let dif: Vec<Option<f64>> = ema12
+        .iter()
+        .zip(ema26.iter())
+        .map(|(e12, e26)| match (e12, e26) {
+            (Some(e12_val), Some(e26_val)) => Some(e12_val - e26_val),
+            _ => None,
+        })
+        .collect();
+
+    // 计算DEA = DIF的9日EMA
+    let dea = calculate_ema_from_values(&dif, 9);
+
+    // 计算MACD = 2 * (DIF - DEA)
+    let macd: Vec<Option<f64>> = dif
+        .iter()
+        .zip(dea.iter())
+        .map(|(d, dea_val)| match (d, dea_val) {
+            (Some(d_val), Some(dea_val)) => Some(2.0 * (d_val - dea_val)),
+            _ => None,
+        })
+        .collect();
+
+    MacdData { dif, dea, macd }
+}
+
+// 从Option<f64>值计算EMA（用于计算DEA）
+fn calculate_ema_from_values(values: &[Option<f64>], period: usize) -> Vec<Option<f64>> {
+    let mut ema_values = Vec::with_capacity(values.len());
+    let multiplier = 2.0 / (period as f64 + 1.0);
+
+    for i in 0..values.len() {
+        if let Some(value) = values[i] {
+            if i == 0 {
+                ema_values.push(Some(value));
+            } else if let Some(prev_ema) = ema_values[i - 1] {
+                let ema = (value - prev_ema) * multiplier + prev_ema;
+                ema_values.push(Some(ema));
+            } else {
+                ema_values.push(None);
+            }
+        } else {
+            ema_values.push(None);
+        }
+    }
+
+    ema_values
+}
+
 // 计算移动平均线（MA）
 fn calculate_ma<T, F>(data: &[T], period: usize, close_fn: F) -> Vec<Option<f64>>
 where
@@ -163,11 +252,9 @@ where
         // 为Y轴标签单独分配空间，避免与K线重叠
         let y_label_width = 50.0; // Y轴标签区域宽度（右侧）
         let width = total_width - y_label_width; // K线图实际宽度（左侧，不包含Y轴标签区域）
-                                                 // 为X轴标签单独分配空间，避免与最低价标签重叠
-        let x_label_height = TEXT_SIZE + TEXT_GAP * 3.0; // X轴标签区域高度（文本高度 + 上下间距）
-                                                         // X轴位置：在底部预留X轴标签空间
-        let x_axis_y = total_height - x_label_height; // X轴位置
-        let height = x_axis_y; // K线图实际高度（到X轴为止）
+                                                 // 为最低价标签预留底部空间，避免标签被裁剪
+        let bottom_margin = TEXT_SIZE + TEXT_GAP * 4.0; // 底部边距（文本高度 + 间距）
+        let height = total_height - bottom_margin; // K线图实际高度（减去底部边距）
 
         // X scale - 使用 ScaleBand 以便蜡烛之间有间距
         let x = ScaleBand::new(self.data.iter().map(|v| x_fn(v)).collect(), vec![0., width])
@@ -241,96 +328,154 @@ where
             }
         }
 
-        // 绘制 X 轴
-        let data_len = self.data.len();
-        let x_label = self.data.iter().enumerate().filter_map(|(i, d)| {
-            if (i + 1) % self.tick_margin == 0 {
-                x.tick(&x_fn(d)).map(|x_tick| {
-                    let align = match i {
-                        0 => {
-                            if data_len == 1 {
-                                TextAlign::Center
-                            } else {
-                                TextAlign::Left
-                            }
-                        }
-                        i if i == data_len - 1 => TextAlign::Right,
-                        _ => TextAlign::Center,
-                    };
-                    AxisText::new(
-                        x_fn(d).into(),
-                        x_tick + band_width / 2.,
-                        cx.theme().muted_foreground,
-                    )
-                    .align(align)
-                })
-            } else {
-                None
-            }
-        });
-
-        // 绘制X轴和标签
-        // 先绘制X轴线
-        let origin = bounds.origin;
-        let mut x_axis_builder = PathBuilder::stroke(px(1.0));
-        let x_axis_start = origin_point(px(0.0), px(x_axis_y), origin);
-        let x_axis_end = origin_point(px(width), px(x_axis_y), origin);
-        x_axis_builder.move_to(x_axis_start);
-        x_axis_builder.line_to(x_axis_end);
-        if let Ok(x_axis_path) = x_axis_builder.build() {
-            window.paint_path(x_axis_path, Background::from(cx.theme().border));
-        }
-
-        // 绘制X轴标签，在X轴下方，使用point而不是origin_point，确保不超出bounds
-        let x_label_y = x_axis_y + TEXT_GAP; // X轴标签位置（X轴下方一个TEXT_GAP）
-                                             // 确保标签不超出bounds底部（考虑文本高度）
-        let max_label_y = total_height - TEXT_SIZE - TEXT_GAP;
-        let clamped_x_label_y = x_label_y.min(max_label_y);
-        let x_label_items: Vec<Text> = x_label
-            .into_iter()
-            .map(|t| {
-                // 确保X坐标在bounds范围内
-                let x_tick_f32 = t.tick.as_f32();
-                let clamped_x = x_tick_f32.max(0.0).min(width);
-                Text {
-                    text: t.text,
-                    origin: point(px(clamped_x), px(clamped_x_label_y)), // 使用point，传递相对坐标
-                    color: t.color,
-                    font_size: t.font_size,
-                    font_weight: gpui::FontWeight::NORMAL,
-                    align: t.align,
-                }
-            })
-            .collect();
-        let x_label_comp = Label::new(x_label_items);
-        x_label_comp.paint(&bounds, window, cx);
+        // 不再绘制X轴和X轴标签（主图不显示X轴标签）
 
         // 绘制右侧Y轴价格标签
-        let y_label_count = 5;
-        let y_labels: Vec<AxisText> = (0..y_label_count)
-            .map(|i| {
-                let ratio = i as f64 / (y_label_count - 1) as f64;
-                let price = domain_min + (domain_max - domain_min) * (1.0 - ratio);
-                let y_tick = height * (i as f32 / (y_label_count - 1) as f32);
-                AxisText::new(format!("{:.2}", price), y_tick, cx.theme().muted_foreground)
-                    .align(TextAlign::Right)
-            })
-            .collect();
+        // 根据价格范围计算合适的整数间隔和标签数量（5-10个）
+        let price_range = domain_max - domain_min;
+
+        // 根据价格范围选择合适的间隔和标签数量
+        let interval = if price_range > 100.0 {
+            // 价格范围大（>100），使用较大间隔
+            let candidate_intervals = vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0];
+            candidate_intervals
+                .iter()
+                .find(|&&interval| {
+                    let count = ((domain_max - domain_min) / interval).ceil() as usize + 1;
+                    count >= 5 && count <= 10
+                })
+                .copied()
+                .unwrap_or(10.0)
+        } else if price_range > 10.0 {
+            // 价格范围中等（10-100），使用中等间隔
+            let candidate_intervals = vec![0.5, 1.0, 2.0, 5.0, 10.0];
+            candidate_intervals
+                .iter()
+                .find(|&&interval| {
+                    let count = ((domain_max - domain_min) / interval).ceil() as usize + 1;
+                    count >= 5 && count <= 10
+                })
+                .copied()
+                .unwrap_or(1.0)
+        } else {
+            // 价格范围小（<10），使用小间隔
+            let candidate_intervals = vec![0.1, 0.2, 0.5, 1.0];
+            candidate_intervals
+                .iter()
+                .find(|&&interval| {
+                    let count = ((domain_max - domain_min) / interval).ceil() as usize + 1;
+                    count >= 5 && count <= 10
+                })
+                .copied()
+                .unwrap_or(0.1)
+        };
+
+        // 计算起始价格（向下取整到最近的间隔）
+        let start_price = (domain_min / interval).floor() * interval;
+        // 计算结束价格（向上取整到最近的间隔）
+        let end_price = (domain_max / interval).ceil() * interval;
+
+        // 生成价格标签（使用整数间隔）
+        // Y轴标签可以比最大值和最小值多一格
+        let mut y_labels: Vec<AxisText> = Vec::new();
+        let mut current_price = start_price;
+        while current_price <= end_price {
+            // 检查价格是否在实际价格范围内，或者比最小值低一格，或者比最大值高一格
+            if (current_price >= min_price && current_price <= max_price)
+                || (current_price < min_price && current_price >= min_price - interval)
+                || (current_price > max_price && current_price <= max_price + interval)
+            {
+                if let Some(y_tick) = y.tick(&current_price) {
+                    // 格式化价格：如果是整数则显示整数，否则显示2位小数
+                    let price_text = if current_price.fract() == 0.0 {
+                        format!("{:.0}", current_price)
+                    } else {
+                        format!("{:.2}", current_price)
+                    };
+                    y_labels.push(
+                        AxisText::new(price_text, y_tick, cx.theme().muted_foreground)
+                            .align(TextAlign::Right),
+                    );
+                }
+            }
+            current_price += interval;
+        }
+
+        // 如果标签数量不在5-10个范围内，重新计算
+        if y_labels.len() < 5 || y_labels.len() > 10 {
+            // 根据实际价格范围重新计算间隔
+            let ideal_count = 7; // 目标标签数量
+            let ideal_interval = price_range / (ideal_count - 1) as f64;
+
+            // 找到最接近的"友好"间隔
+            let friendly_intervals = if price_range > 100.0 {
+                vec![1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
+            } else if price_range > 10.0 {
+                vec![0.5, 1.0, 2.0, 5.0, 10.0]
+            } else {
+                vec![0.1, 0.2, 0.5, 1.0]
+            };
+
+            let final_interval = friendly_intervals
+                .iter()
+                .min_by(|&&a, &&b| {
+                    (a - ideal_interval)
+                        .abs()
+                        .partial_cmp(&(b - ideal_interval).abs())
+                        .unwrap()
+                })
+                .copied()
+                .unwrap_or(ideal_interval);
+
+            let start_price = (domain_min / final_interval).floor() * final_interval;
+            let end_price = (domain_max / final_interval).ceil() * final_interval;
+
+            y_labels.clear();
+            let mut current_price = start_price;
+            while current_price <= end_price {
+                // 检查价格是否在实际价格范围内，或者比最小值低一格，或者比最大值高一格
+                if (current_price >= min_price && current_price <= max_price)
+                    || (current_price < min_price && current_price >= min_price - final_interval)
+                    || (current_price > max_price && current_price <= max_price + final_interval)
+                {
+                    if let Some(y_tick) = y.tick(&current_price) {
+                        let price_text = if current_price.fract() == 0.0 {
+                            format!("{:.0}", current_price)
+                        } else {
+                            format!("{:.2}", current_price)
+                        };
+                        y_labels.push(
+                            AxisText::new(price_text, y_tick, cx.theme().muted_foreground)
+                                .align(TextAlign::Right),
+                        );
+                    }
+                }
+                current_price += final_interval;
+            }
+        }
 
         // 在右侧绘制Y轴标签，使用point传递相对坐标（Label::paint会自动加上bounds.origin）
+        // Y轴标签的Y坐标应该与K线图的价格值对齐
+        // 注意：文本的origin是基线位置（底部），需要调整Y坐标使文本中心与价格线对齐
         let y_label_items: Vec<Text> = y_labels
             .into_iter()
             .map(|t| {
-                // 确保Y坐标在bounds范围内
+                // Y轴标签的Y坐标直接使用y.tick()返回的值，确保与K线图的价格值对齐
+                // y.tick()返回的Y坐标在[10., height]范围内，对应[domain_max, domain_min]
                 let y_tick_f32 = t.tick.as_f32();
-                let clamped_y = y_tick_f32.max(0.0).min(height);
+                // 确保Y坐标在图表绘制区域内（不超出bounds）
+                let clamped_y = y_tick_f32.max(10.0).min(height);
+                // 文本的origin是基线位置（底部），需要调整Y坐标使文本中心与价格线对齐
+                // 文本高度约为TEXT_SIZE，所以文本中心在 origin.y + TEXT_SIZE / 2
+                // 要使文本中心与价格线对齐，需要将origin.y设置为 price_y - TEXT_SIZE / 2
+                let text_baseline_y = clamped_y - TEXT_SIZE / 2.0;
                 // Y轴标签显示在右侧预留区域（K线图右侧）
                 // 使用point传递相对坐标，Label::paint会自动加上bounds.origin
                 // 由于是右对齐，origin.x是文本的右边缘位置，所以应该设置为total_width - TEXT_GAP
                 let y_label_x = total_width - TEXT_GAP; // Y轴标签X位置（预留区域右侧，右对齐）
                 Text {
                     text: t.text,
-                    origin: point(px(y_label_x), px(clamped_y)), // 使用point，传递相对坐标
+                    origin: point(px(y_label_x), px(text_baseline_y)), // 使用point，传递相对坐标，Y坐标使文本中心与K线图价格值对齐
                     color: t.color,
                     font_size: t.font_size,
                     font_weight: gpui::FontWeight::NORMAL,
@@ -360,7 +505,7 @@ where
             Hsla::parse_hex("#aaa9a9").unwrap(), // MA30 （浅灰色）
             Hsla::parse_hex("#640000").unwrap(), // MA60 （深绿色）
             Hsla::parse_hex("#206f09").unwrap(), // MA120 （深绿色）
-            Hsla::parse_hex("#FFA500").unwrap(), // MA250 (橙色)
+            Hsla::parse_hex("#f4b350").unwrap(), // MA250 (黄色)
         ];
         let ma_data = [&ma5, &ma10, &ma20, &ma30, &ma60, &ma120, &ma250];
 
@@ -585,9 +730,10 @@ where
                     let arrow_size = 8.0;
 
                     // 绘制向上指向的箭头（在最低点下方）
-                    // 确保箭头和标签在X轴标签上方，不会重叠
-                    let arrow_bottom_y = min_y + 20.0; // 减少箭头与最低点的距离，避免超出K线图区域
-                    let arrow_tip = origin_point(px(marker_x), px(min_y), origin);
+                    // 参考最高价的样式：箭头与价格点的距离为15像素
+                    let arrow_offset = 15.0; // 箭头底部与最低价的距离（与最高价对称）
+                    let arrow_bottom_y = min_y + arrow_offset; // 箭头底部位置（最低价下方15像素）
+                    let arrow_tip = origin_point(px(marker_x), px(min_y), origin); // 箭头尖端指向最低价
                     let arrow_left =
                         origin_point(px(marker_x - arrow_size / 2.0), px(arrow_bottom_y), origin);
                     let arrow_right =
@@ -604,16 +750,10 @@ where
                     }
 
                     // 绘制价格标签（在箭头下方）
-                    // 确保标签在X轴标签上方，不会重叠
+                    // 确保标签在箭头下方，有足够的距离
                     let label_text = format!("最低: {:.2}", min_price_value);
                     let label_center_x = marker_x; // 使用K线中心
-                    let label_center_y = arrow_bottom_y + 15.0; // 标签在箭头下方，合适的距离
-                                                                // 检查标签是否会超出K线图区域（X轴上方），如果会则调整位置
-                                                                // 确保标签在X轴上方至少保留TEXT_GAP的距离
-                    let max_label_y = height - TEXT_GAP - TEXT_SIZE;
-                    let label_center_y = label_center_y.min(max_label_y);
-                    // 文本的origin.y是基线位置，为了垂直居中，需要稍微向下调整
-                    let text_baseline_y = label_center_y + 3.0;
+                    let text_baseline_y = arrow_bottom_y;
                     let price_label = Label::new(vec![Text {
                         text: label_text.into(),
                         origin: point(px(label_center_x), px(text_baseline_y)),
@@ -887,27 +1027,12 @@ where
 
 // 成交量图组件（带十字光标联动）
 struct VolumeChart {
-    bar_chart: BarChart<StockData, String, f64>,
     data: Vec<StockData>,
 }
 
 impl VolumeChart {
-    fn new(data: Vec<StockData>, success_color: Hsla, danger_color: Hsla) -> Self {
-        Self {
-            bar_chart: BarChart::new(data.clone())
-                .x(|d| d.date.clone())
-                .y(|d| d.volume as f64)
-                .fill(move |d| {
-                    // 与K线图颜色一致：上涨红色，下跌绿色
-                    if d.close > d.open {
-                        danger_color
-                    } else {
-                        success_color
-                    }
-                })
-                .tick_margin(3),
-            data,
-        }
+    fn new(_data: Vec<StockData>, _success_color: Hsla, _danger_color: Hsla) -> Self {
+        Self { data: _data }
     }
 }
 
@@ -971,36 +1096,140 @@ impl Element for VolumeChart {
         let y_label_width = 50.0; // 与主图K线图一致
         let chart_width = total_width - y_label_width; // 图表实际宽度（不包含Y轴标签区域）
 
-        // 创建一个调整后的bounds，使BarChart使用与主图相同的宽度
-        let adjusted_bounds = Bounds {
-            origin: bounds.origin,
-            size: gpui::Size {
-                width: px(chart_width),
-                height: bounds.size.height,
-            },
-        };
+        let height = bounds.size.height.as_f32();
+        use gpui_component::plot::AXIS_GAP;
+        let chart_height = height - AXIS_GAP; // 图表区域高度（不包括X轴标签）
 
-        // 先绘制BarChart（使用调整后的bounds，确保X轴与主图对齐）
-        <BarChart<StockData, String, f64> as Plot>::paint(
-            &mut self.bar_chart,
-            adjusted_bounds,
-            window,
-            cx,
-        );
+        // X scale - 与主图一致
+        let x_fn = |d: &StockData| d.date.clone();
+        let x = ScaleBand::new(
+            self.data.iter().map(|v| x_fn(v)).collect(),
+            vec![0., chart_width],
+        )
+        .padding_inner(0.3)
+        .padding_outer(0.1);
+        let band_width = x.band_width();
+
+        // Y scale
+        let min_volume = self
+            .data
+            .iter()
+            .map(|d| d.volume as f64)
+            .fold(f64::INFINITY, f64::min);
+        let max_volume = self
+            .data
+            .iter()
+            .map(|d| d.volume as f64)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let volume_range = max_volume - min_volume;
+        let margin = volume_range * 0.05;
+        let domain_min = (min_volume - margin).max(0.0);
+        let domain_max = max_volume + margin;
+
+        let y = ScaleLinear::new(vec![domain_min, domain_max], vec![chart_height, 10.]);
+
+        // 绘制Y轴标签（成交量）- 只显示4个值，与网格线对齐
+        use gpui::point;
+        use gpui::TextAlign;
+        use gpui_component::plot::label::{Text, TEXT_GAP, TEXT_SIZE};
+        use gpui_component::plot::{AxisText, Label};
+
+        // 计算4个与网格线对齐的标签值
+        // 网格线的Y坐标是 chart_height * i / 4.0 (i从0到3)
+        // 需要找到对应的volume值，使得y.tick(&volume_value)与网格线Y坐标对齐
+        let label_count = 4;
+        let mut volume_labels: Vec<AxisText> = Vec::new();
+        for i in 0..label_count {
+            // 网格线的Y坐标（从底部到顶部）
+            let grid_y = chart_height * i as f32 / (label_count - 1) as f32;
+            // 从Y坐标反推对应的volume值
+            // ScaleLinear映射：domain_min -> chart_height, domain_max -> 10.0
+            // 所以：value = domain_min + (domain_max - domain_min) * (1.0 - (y - 10.0) / (chart_height - 10.0))
+            let ratio = if chart_height > 10.0 {
+                (grid_y - 10.0) / (chart_height - 10.0)
+            } else {
+                0.0
+            };
+            let volume_value = domain_min + (domain_max - domain_min) * (1.0 - ratio as f64);
+
+            // 优化成交量单位显示：统一使用合适的单位
+            let volume_text = if volume_value >= 1_000_000_000.0 {
+                format!("{:.1}亿", volume_value / 100_000_000.0)
+            } else if volume_value >= 10_000.0 {
+                format!("{:.1}万", volume_value / 10_000.0)
+            } else if volume_value >= 1_000.0 {
+                format!("{:.1}千", volume_value / 1_000.0)
+            } else {
+                format!("{:.0}", volume_value)
+            };
+            volume_labels.push(
+                AxisText::new(volume_text, grid_y, cx.theme().muted_foreground)
+                    .align(TextAlign::Right),
+            );
+        }
+
+        // 收集网格线的Y坐标（在绘制Y轴标签之前）
+        let grid_y_positions: Vec<f32> = volume_labels
+            .iter()
+            .map(|label| label.tick.as_f32())
+            .collect();
+
+        // 绘制成交量Y轴标签
+        let volume_label_items: Vec<Text> = volume_labels
+            .into_iter()
+            .map(|t| {
+                // Y轴标签的Y坐标直接使用网格线的Y坐标，确保与网格线对齐
+                let y_tick_f32 = t.tick.as_f32();
+                // 确保Y坐标在图表绘制区域内（不超出bounds）
+                let clamped_y = y_tick_f32.max(10.0).min(chart_height);
+                // 文本的origin是基线位置（底部），需要调整Y坐标使文本中心与网格线对齐
+                let text_baseline_y = clamped_y - TEXT_SIZE / 2.0;
+                let y_label_x = total_width - TEXT_GAP;
+                Text {
+                    text: t.text,
+                    origin: point(px(y_label_x), px(text_baseline_y)), // Y坐标使文本中心与网格线对齐
+                    color: t.color,
+                    font_size: t.font_size,
+                    font_weight: gpui::FontWeight::NORMAL,
+                    align: TextAlign::Right,
+                }
+            })
+            .collect();
+        let volume_label = Label::new(volume_label_items);
+        volume_label.paint(&bounds, window, cx);
+
+        // 绘制网格（不绘制X轴）- 网格线对应Y轴标签值
+        Grid::new()
+            .y(grid_y_positions)
+            .stroke(cx.theme().border)
+            .dash_array(&[px(4.), px(2.)])
+            .paint(&bounds, window);
+
+        // 手动绘制柱状图（不绘制X轴标签）
+        let success_color = cx.theme().success.opacity(0.7);
+        let danger_color = cx.theme().danger.opacity(0.7);
+        use gpui_component::plot::shape::Bar;
+        let x_clone = x.clone(); // 克隆x用于闭包
+        let x_fn_clone = x_fn.clone(); // 克隆x_fn用于闭包
+        let bar = Bar::new()
+            .data(&self.data)
+            .band_width(band_width)
+            .x(move |d| x_clone.tick(&x_fn_clone(d)))
+            .y0(chart_height)
+            .y1(move |d| y.tick(&(d.volume as f64)))
+            .fill(move |d| {
+                if d.close > d.open {
+                    danger_color
+                } else {
+                    success_color
+                }
+            });
+        bar.paint(&bounds, window, cx);
 
         // 扩展检测范围：检测鼠标是否在K线图或成交量图的X坐标范围内
         // 不仅检测成交量图bounds，还要检测K线图的X坐标范围，以便联动
         let mouse_pos = window.mouse_position();
         let origin = bounds.origin;
-        let width = chart_width; // 使用与主图相同的宽度
-        let height = bounds.size.height.as_f32();
-
-        // 使用与K线图相同的X scale计算（确保竖线对齐）
-        let x_fn = |d: &StockData| d.date.clone();
-        let x = ScaleBand::new(self.data.iter().map(|v| x_fn(v)).collect(), vec![0., width])
-            .padding_inner(0.3) // 与K线图一致
-            .padding_outer(0.1); // 与K线图一致
-        let band_width = x.band_width();
 
         let mut cursor_x = None;
 
@@ -1060,6 +1289,382 @@ impl Element for VolumeChart {
     }
 }
 
+// MACD图表组件
+struct MacdChart {
+    data: Vec<StockData>,
+    macd_data: MacdData,
+}
+
+impl MacdChart {
+    fn new(data: Vec<StockData>) -> Self {
+        let macd_data = calculate_macd(&data, |d| d.close);
+        Self { data, macd_data }
+    }
+}
+
+impl IntoElement for MacdChart {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for MacdChart {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let style = Style {
+            size: gpui::Size::full(),
+            ..Default::default()
+        };
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        // 与主图K线图保持一致：减去Y轴标签宽度，确保X轴对齐
+        let total_width = bounds.size.width.as_f32();
+        let y_label_width = 50.0; // 与主图K线图一致
+        let chart_width = total_width - y_label_width; // 图表实际宽度（不包含Y轴标签区域）
+
+        let origin = bounds.origin;
+        let height = bounds.size.height.as_f32();
+        use gpui_component::plot::AXIS_GAP;
+        let chart_height = height - AXIS_GAP; // 图表区域高度（不包括X轴标签）
+
+        // X scale - 与主图一致
+        let x_fn = |d: &StockData| d.date.clone();
+        let x = ScaleBand::new(
+            self.data.iter().map(|v| x_fn(v)).collect(),
+            vec![0., chart_width],
+        )
+        .padding_inner(0.3)
+        .padding_outer(0.1);
+        let band_width = x.band_width();
+
+        // 计算Y scale - 包含DIF、DEA和MACD的所有值
+        let mut all_values: Vec<f64> = Vec::new();
+        for v in self.macd_data.dif.iter().flatten() {
+            all_values.push(*v);
+        }
+        for v in self.macd_data.dea.iter().flatten() {
+            all_values.push(*v);
+        }
+        for v in self.macd_data.macd.iter().flatten() {
+            all_values.push(*v);
+        }
+
+        if all_values.is_empty() {
+            return;
+        }
+
+        let min_val = all_values.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_val = all_values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let range = max_val - min_val;
+        let margin = range * 0.1;
+        let domain_min = min_val - margin;
+        let domain_max = max_val + margin;
+
+        let y = ScaleLinear::new(vec![domain_min, domain_max], vec![chart_height, 10.]);
+
+        // 绘制MACD柱状图（正值和负值用不同颜色）
+        let success_color = cx.theme().success.opacity(0.7);
+        let danger_color = cx.theme().danger.opacity(0.7);
+        let zero_y = y.tick(&0.0).unwrap_or(chart_height / 2.0);
+
+        for (i, d) in self.data.iter().enumerate() {
+            if let Some(macd_val) = self.macd_data.macd.get(i).and_then(|v| *v) {
+                if let Some(x_tick) = x.tick(&x_fn(d)) {
+                    if let Some(macd_y) = y.tick(&macd_val) {
+                        let bar_x = x_tick + band_width * 0.1;
+                        let bar_width = band_width * 0.8;
+                        let bar_top = macd_y.min(zero_y);
+                        let bar_bottom = macd_y.max(zero_y);
+                        let bar_height = (bar_bottom - bar_top).abs();
+
+                        let color = if macd_val >= 0.0 {
+                            danger_color // 正值用红色
+                        } else {
+                            success_color // 负值用绿色
+                        };
+
+                        let bar_bounds = gpui::Bounds {
+                            origin: origin_point(px(bar_x), px(bar_top), origin),
+                            size: gpui::Size {
+                                width: px(bar_width),
+                                height: px(bar_height),
+                            },
+                        };
+                        window.paint_quad(gpui::quad(
+                            bar_bounds,
+                            0.0,
+                            color,
+                            px(0.0),
+                            color,
+                            gpui::BorderStyle::default(),
+                        ));
+                    }
+                }
+            }
+        }
+
+        // 绘制DIF线（深灰色）
+        use gpui_component::Colorize;
+        let dif_color = Hsla::parse_hex("#575756").unwrap(); // 深灰色
+        let mut dif_builder = PathBuilder::stroke(px(1.0));
+        let mut has_dif_points = false;
+        for (i, d) in self.data.iter().enumerate() {
+            if let Some(dif_val) = self.macd_data.dif.get(i).and_then(|v| *v) {
+                if let Some(x_tick) = x.tick(&x_fn(d)) {
+                    if let Some(dif_y) = y.tick(&dif_val) {
+                        let point = origin_point(px(x_tick + band_width / 2.0), px(dif_y), origin);
+                        if !has_dif_points {
+                            dif_builder.move_to(point);
+                            has_dif_points = true;
+                        } else {
+                            dif_builder.line_to(point);
+                        }
+                    }
+                }
+            }
+        }
+        if has_dif_points {
+            if let Ok(dif_path) = dif_builder.build() {
+                window.paint_path(dif_path, Background::from(dif_color));
+            }
+        }
+
+        // 绘制DEA线（紫色）
+        let dea_color = Hsla::parse_hex("#e82bf6").unwrap(); // 紫色
+        let mut dea_builder = PathBuilder::stroke(px(1.0));
+        let mut has_dea_points = false;
+        for (i, d) in self.data.iter().enumerate() {
+            if let Some(dea_val) = self.macd_data.dea.get(i).and_then(|v| *v) {
+                if let Some(x_tick) = x.tick(&x_fn(d)) {
+                    if let Some(dea_y) = y.tick(&dea_val) {
+                        let point = origin_point(px(x_tick + band_width / 2.0), px(dea_y), origin);
+                        if !has_dea_points {
+                            dea_builder.move_to(point);
+                            has_dea_points = true;
+                        } else {
+                            dea_builder.line_to(point);
+                        }
+                    }
+                }
+            }
+        }
+        if has_dea_points {
+            if let Ok(dea_path) = dea_builder.build() {
+                window.paint_path(dea_path, Background::from(dea_color));
+            }
+        }
+
+        // 绘制零轴线
+        let zero_line_color = cx.theme().border;
+        let mut zero_builder = PathBuilder::stroke(px(1.0));
+        let zero_start = origin_point(px(0.0), px(zero_y), origin);
+        let zero_end = origin_point(px(chart_width), px(zero_y), origin);
+        zero_builder.move_to(zero_start);
+        zero_builder.line_to(zero_end);
+        if let Ok(zero_path) = zero_builder.build() {
+            window.paint_path(zero_path, Background::from(zero_line_color));
+        }
+
+        // 绘制MACD Y轴标签 - 只显示4个值，与网格线对齐
+        use gpui::point;
+        use gpui::TextAlign;
+        use gpui_component::plot::label::{Text, TEXT_GAP, TEXT_SIZE};
+        use gpui_component::plot::{AxisText, Label};
+
+        // 计算4个与网格线对齐的标签值
+        // 网格线的Y坐标是 chart_height * i / 4.0 (i从0到3)
+        // 需要找到对应的MACD值，使得y.tick(&macd_value)与网格线Y坐标对齐
+        let label_count = 4;
+        let mut macd_labels: Vec<AxisText> = Vec::new();
+        for i in 0..label_count {
+            // 网格线的Y坐标（从底部到顶部）
+            let grid_y = chart_height * i as f32 / (label_count - 1) as f32;
+            // 从Y坐标反推对应的MACD值
+            // ScaleLinear映射：domain_min -> chart_height, domain_max -> 10.0
+            // 所以：value = domain_min + (domain_max - domain_min) * (1.0 - (y - 10.0) / (chart_height - 10.0))
+            let ratio = if chart_height > 10.0 {
+                (grid_y - 10.0) / (chart_height - 10.0)
+            } else {
+                0.0
+            };
+            let macd_value = domain_min + (domain_max - domain_min) * (1.0 - ratio as f64);
+
+            // 根据值的大小自动格式化
+            let macd_text = if macd_value.abs() >= 10.0 {
+                format!("{:.0}", macd_value)
+            } else if macd_value.abs() >= 1.0 {
+                format!("{:.1}", macd_value)
+            } else {
+                format!("{:.2}", macd_value)
+            };
+            macd_labels.push(
+                AxisText::new(macd_text, grid_y, cx.theme().muted_foreground)
+                    .align(TextAlign::Right),
+            );
+        }
+
+        // 收集网格线的Y坐标（在绘制Y轴标签之前）
+        let grid_y_positions: Vec<f32> = macd_labels
+            .iter()
+            .map(|label| label.tick.as_f32())
+            .collect();
+
+        // 绘制MACD Y轴标签
+        let macd_label_items: Vec<Text> = macd_labels
+            .into_iter()
+            .map(|t| {
+                // Y轴标签的Y坐标直接使用网格线的Y坐标，确保与网格线对齐
+                let y_tick_f32 = t.tick.as_f32();
+                // 确保Y坐标在图表绘制区域内（不超出bounds）
+                let clamped_y = y_tick_f32.max(10.0).min(chart_height);
+                // 文本的origin是基线位置（底部），需要调整Y坐标使文本中心与网格线对齐
+                let text_baseline_y = clamped_y - TEXT_SIZE / 2.0;
+                let y_label_x = total_width - TEXT_GAP;
+                Text {
+                    text: t.text,
+                    origin: point(px(y_label_x), px(text_baseline_y)), // Y坐标使文本中心与网格线对齐
+                    color: t.color,
+                    font_size: t.font_size,
+                    font_weight: gpui::FontWeight::NORMAL,
+                    align: TextAlign::Right,
+                }
+            })
+            .collect();
+        let macd_label = Label::new(macd_label_items);
+        macd_label.paint(&bounds, window, cx);
+
+        // 绘制网格 - 网格线对应Y轴标签值
+        Grid::new()
+            .y(grid_y_positions)
+            .stroke(cx.theme().border)
+            .dash_array(&[px(4.), px(2.)])
+            .paint(&bounds, window);
+
+        // 绘制X轴（使用BarChart的Axis组件）
+        let data_len = self.data.len();
+        let x_label = self.data.iter().enumerate().filter_map(|(i, d)| {
+            if (i + 1) % 3 == 0 {
+                x.tick(&x_fn(d)).map(|x_tick| {
+                    let align = match i {
+                        0 => {
+                            if data_len == 1 {
+                                TextAlign::Center
+                            } else {
+                                TextAlign::Left
+                            }
+                        }
+                        i if i == data_len - 1 => TextAlign::Right,
+                        _ => TextAlign::Center,
+                    };
+                    AxisText::new(
+                        x_fn(d),
+                        x_tick + band_width / 2.,
+                        cx.theme().muted_foreground,
+                    )
+                    .align(align)
+                })
+            } else {
+                None
+            }
+        });
+
+        use gpui_component::plot::Axis;
+        Axis::new()
+            .x(chart_height)
+            .x_label(x_label)
+            .stroke(cx.theme().border)
+            .paint(&bounds, window, cx);
+
+        // 绘制竖线（与K线图的十字光标联动）
+        let mouse_pos = window.mouse_position();
+        let mut cursor_x = None;
+
+        let global_x = mouse_pos.x.as_f32();
+        let bounds_x_start = bounds.origin.x.as_f32();
+        let bounds_x_end = (bounds.origin.x + bounds.size.width).as_f32();
+
+        if global_x >= bounds_x_start && global_x <= bounds_x_end {
+            let local_x = global_x - bounds_x_start;
+            for d in &self.data {
+                if let Some(x_tick) = x.tick(&x_fn(d)) {
+                    let band_start = x_tick;
+                    let band_end = x_tick + band_width;
+                    if local_x >= band_start && local_x <= band_end {
+                        cursor_x = Some(px(x_tick + band_width / 2.0));
+                        break;
+                    }
+                }
+            }
+        }
+
+        if let Some(cx_pos) = cursor_x {
+            let cursor_color = cx.theme().foreground.opacity(0.6);
+            let mut vline_builder = PathBuilder::stroke(px(1.5)).dash_array(&[px(4.0), px(2.0)]);
+            let vline_start = origin_point(cx_pos, px(0.0), origin);
+            let vline_end = origin_point(cx_pos, px(chart_height), origin);
+            vline_builder.move_to(vline_start);
+            vline_builder.line_to(vline_end);
+            if let Ok(vline_path) = vline_builder.build() {
+                window.paint_path(vline_path, Background::from(cursor_color));
+            }
+        }
+
+        // 监听鼠标移动事件，触发重绘（与K线图联动）
+        let chart_bounds = bounds;
+        window.on_mouse_event({
+            let bounds = chart_bounds;
+            move |event: &gpui::MouseMoveEvent, _, window, _cx| {
+                let mouse_x = event.position.x;
+                let bounds_x_start = bounds.origin.x;
+                let bounds_x_end = bounds.origin.x + bounds.size.width;
+                if mouse_x >= bounds_x_start && mouse_x <= bounds_x_end {
+                    window.refresh();
+                }
+            }
+        });
+    }
+}
+
 fn stock_chart(data: Vec<StockData>, cx: &mut Context<Example>) -> impl IntoElement {
     v_flex()
         .gap_4()
@@ -1093,7 +1698,16 @@ fn stock_chart(data: Vec<StockData>, cx: &mut Context<Example>) -> impl IntoElem
                 .border_color(cx.theme().border)
                 .rounded_lg()
                 .p_4()
-                .child(VolumeChart::new(data, success_color, danger_color))
+                .child(VolumeChart::new(data.clone(), success_color, danger_color))
+        })
+        .child({
+            div()
+                .h(px(150.))
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded_lg()
+                .p_4()
+                .child(MacdChart::new(data))
         })
 }
 
