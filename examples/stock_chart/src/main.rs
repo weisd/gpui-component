@@ -800,6 +800,162 @@ where
     }
 }
 
+// 成交量图组件（带十字光标联动）
+struct VolumeChart {
+    bar_chart: BarChart<StockData, String, f64>,
+    data: Vec<StockData>,
+}
+
+impl VolumeChart {
+    fn new(data: Vec<StockData>, success_color: Hsla, danger_color: Hsla) -> Self {
+        Self {
+            bar_chart: BarChart::new(data.clone())
+                .x(|d| d.date.clone())
+                .y(|d| d.volume as f64)
+                .fill(move |d| {
+                    // 与K线图颜色一致：上涨红色，下跌绿色
+                    if d.close > d.open {
+                        danger_color
+                    } else {
+                        success_color
+                    }
+                })
+                .tick_margin(3),
+            data,
+        }
+    }
+}
+
+impl IntoElement for VolumeChart {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for VolumeChart {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let style = Style {
+            size: gpui::Size::full(),
+            ..Default::default()
+        };
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        // 先绘制BarChart
+        <BarChart<StockData, String, f64> as Plot>::paint(&mut self.bar_chart, bounds, window, cx);
+
+        // 扩展检测范围：检测鼠标是否在K线图或成交量图的X坐标范围内
+        // 不仅检测成交量图bounds，还要检测K线图的X坐标范围，以便联动
+        let mouse_pos = window.mouse_position();
+        let origin = bounds.origin;
+        let width = bounds.size.width.as_f32();
+        let height = bounds.size.height.as_f32();
+
+        // 使用与K线图相同的X scale计算（确保竖线对齐）
+        let x_fn = |d: &StockData| d.date.clone();
+        let x = ScaleBand::new(self.data.iter().map(|v| x_fn(v)).collect(), vec![0., width])
+            .padding_inner(0.3) // 与K线图一致
+            .padding_outer(0.1); // 与K线图一致
+        let band_width = x.band_width();
+
+        let mut cursor_x = None;
+
+        // 计算对应的数据点索引（与K线图使用相同的逻辑）
+        // 扩展检测：不仅检测成交量图bounds，还要检测整个窗口的X坐标范围
+        let global_x = mouse_pos.x.as_f32();
+        let bounds_x_start = bounds.origin.x.as_f32();
+        let bounds_x_end = (bounds.origin.x + bounds.size.width).as_f32();
+
+        if global_x >= bounds_x_start && global_x <= bounds_x_end {
+            let local_x = global_x - bounds_x_start;
+            for d in &self.data {
+                if let Some(x_tick) = x.tick(&x_fn(d)) {
+                    let band_start = x_tick;
+                    let band_end = x_tick + band_width;
+                    if local_x >= band_start && local_x <= band_end {
+                        cursor_x = Some(px(x_tick + band_width / 2.0));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 绘制竖线（与K线图的十字光标联动）
+        // 竖线只延伸到图表区域底部（X轴位置），不超出X轴标签区域
+        if let Some(cx_pos) = cursor_x {
+            let cursor_color = cx.theme().foreground.opacity(0.6);
+            // BarChart使用AXIS_GAP预留X轴标签空间，图表区域高度是 height - AXIS_GAP
+            // 竖线应该只延伸到图表区域底部（X轴位置）
+            use gpui_component::plot::AXIS_GAP;
+            let chart_height = height - AXIS_GAP; // 图表区域高度（不包括X轴标签）
+            let mut vline_builder = PathBuilder::stroke(px(1.5)).dash_array(&[px(4.0), px(2.0)]); // 虚线样式：4像素实线，2像素空白
+            let vline_start = origin_point(cx_pos, px(0.0), origin);
+            let vline_end = origin_point(cx_pos, px(chart_height), origin); // 只延伸到图表区域底部
+            vline_builder.move_to(vline_start);
+            vline_builder.line_to(vline_end);
+            if let Ok(vline_path) = vline_builder.build() {
+                window.paint_path(vline_path, Background::from(cursor_color));
+            }
+        }
+
+        // 监听鼠标移动事件，触发重绘（与K线图联动）
+        let chart_bounds = bounds;
+        window.on_mouse_event({
+            let bounds = chart_bounds;
+            move |event: &gpui::MouseMoveEvent, _, window, _cx| {
+                // 扩展检测范围：检测鼠标是否在图表bounds内，或者在整个窗口的X坐标范围内
+                // 这样即使鼠标在K线图区域，成交量图的竖线也会更新
+                let mouse_x = event.position.x;
+                let bounds_x_start = bounds.origin.x;
+                let bounds_x_end = bounds.origin.x + bounds.size.width;
+                if mouse_x >= bounds_x_start && mouse_x <= bounds_x_end {
+                    window.refresh();
+                }
+            }
+        });
+    }
+}
+
 fn stock_chart(data: Vec<StockData>, cx: &mut Context<Example>) -> impl IntoElement {
     v_flex()
         .gap_4()
@@ -833,20 +989,7 @@ fn stock_chart(data: Vec<StockData>, cx: &mut Context<Example>) -> impl IntoElem
                 .border_color(cx.theme().border)
                 .rounded_lg()
                 .p_4()
-                .child(
-                    BarChart::new(data)
-                        .x(|d| d.date.clone())
-                        .y(|d| d.volume as f64)
-                        .fill(move |d| {
-                            // 与K线图颜色一致：上涨红色，下跌绿色
-                            if d.close > d.open {
-                                danger_color // 上涨：红色
-                            } else {
-                                success_color // 下跌：绿色
-                            }
-                        })
-                        .tick_margin(3),
-                )
+                .child(VolumeChart::new(data, success_color, danger_color))
         })
 }
 
