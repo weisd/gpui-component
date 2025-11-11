@@ -264,15 +264,18 @@ where
         } else {
             0.0
         };
-        let width = total_width - left_y_axis_width - y_label_width; // K线图实际宽度（中间区域，不包含左右Y轴标签区域）
-                                                                     // 为最低价标签预留底部空间，避免标签被裁剪c
+        // K线图实际宽度：始终只减去右侧Y轴标签宽度，左侧标签不影响内容区域宽度
+        let width = total_width - y_label_width; // K线图实际宽度（不包含右侧Y轴标签区域）
+                                                 // 为最低价标签预留底部空间，避免标签被裁剪c
         let bottom_margin = TEXT_SIZE + TEXT_GAP * 4.0; // 底部边距（文本高度 + 间距）
         let height = total_height - bottom_margin; // K线图实际高度（减去底部边距）
 
         // X scale - 使用 ScaleBand 以便蜡烛之间有间距，从左侧Y轴标签区域后开始
+        // 右边界始终是 total_width - y_label_width（减去右侧Y轴标签区域）
+        let chart_right_edge = total_width - y_label_width;
         let x = ScaleBand::new(
             self.data.iter().map(|v| x_fn(v)).collect(),
-            vec![left_y_axis_width, left_y_axis_width + width],
+            vec![left_y_axis_width, chart_right_edge],
         )
         .padding_inner(0.3)
         .padding_outer(0.1);
@@ -328,6 +331,7 @@ where
             // 计算对应的数据点索引（需要考虑左侧Y轴标签的偏移）
             for (i, d) in self.data.iter().enumerate() {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
+                    let x_tick = x_tick + left_y_axis_width;
                     let band_start = x_tick;
                     let band_end = x_tick + band_width;
                     if local_x >= band_start && local_x <= band_end {
@@ -536,7 +540,7 @@ where
         }
 
         // 右侧分隔线（Y轴标签区域左边缘）
-        let right_divider_x = left_y_axis_width + width;
+        let right_divider_x = chart_right_edge;
         let mut right_divider_builder = PathBuilder::stroke(px(1.0));
         let right_divider_start = origin_point(px(right_divider_x), px(0.0), bounds.origin);
         let right_divider_end = origin_point(px(right_divider_x), px(total_height), bounds.origin);
@@ -551,7 +555,7 @@ where
         let chart_bounds = gpui::Bounds {
             origin: origin_point(px(left_y_axis_width), px(0.0), bounds.origin),
             size: gpui::Size {
-                width: px(width), // 只使用图表宽度，不包含左右Y轴标签区域
+                width: px(chart_right_edge - left_y_axis_width), // 图表宽度：从左侧标签到右侧标签
                 height: bounds.size.height,
             },
         };
@@ -584,8 +588,10 @@ where
             for (i, d) in self.data.iter().enumerate() {
                 if let Some(ma_value) = ma_values.get(i).and_then(|v| *v) {
                     if let Some(x_tick) = x.tick(&x_fn(d)) {
-                        // 确保x_tick在图表区域内（不小于left_y_axis_width）
-                        if x_tick >= left_y_axis_width {
+                        // ScaleBand已经处理了left_y_axis_width的偏移，x_tick已经是正确的位置
+                        // 只需要检查右边界，防止超出chart_right_edge（考虑padding_outer的容差）
+                        let x_tick = x_tick + left_y_axis_width;
+                        if x_tick <= chart_right_edge + band_width {
                             if let Some(ma_y_f32) = y.tick(&ma_value) {
                                 let ma_y = px(ma_y_f32);
                                 let point =
@@ -617,8 +623,10 @@ where
         for d in &self.data {
             let x_tick = x.tick(&x_fn(d));
             if let Some(x_tick) = x_tick {
-                // 确保x_tick在图表区域内（不小于left_y_axis_width）
-                if x_tick < left_y_axis_width {
+                // ScaleBand已经处理了left_y_axis_width的偏移，x_tick已经是正确的位置
+                // 只需要检查右边界，防止超出chart_right_edge（考虑padding_outer的容差）
+                let x_tick = x_tick + left_y_axis_width;
+                if x_tick > chart_right_edge + band_width {
                     continue;
                 }
 
@@ -754,8 +762,10 @@ where
             // 确保使用正确的数据来获取x_tick
             let x_value = x_fn(max_data);
             if let Some(x_tick) = x.tick(&x_value) {
-                // 确保x_tick在图表区域内（不小于left_y_axis_width）
-                if x_tick >= left_y_axis_width {
+                // ScaleBand已经处理了left_y_axis_width的偏移，x_tick已经是正确的位置
+                // 只需要检查右边界，防止超出chart_right_edge
+                let x_tick = x_tick + left_y_axis_width;
+                if x_tick <= chart_right_edge {
                     if let Some(max_y) = y.tick(&max_price_value) {
                         // marker_x 是K线的中心位置
                         let marker_x = x_tick + band_width / 2.0;
@@ -804,8 +814,10 @@ where
             // 确保使用正确的数据来获取x_tick
             let x_value = x_fn(min_data);
             if let Some(x_tick) = x.tick(&x_value) {
-                // 确保x_tick在图表区域内（不小于left_y_axis_width）
-                if x_tick >= left_y_axis_width {
+                // ScaleBand已经处理了left_y_axis_width的偏移，x_tick已经是正确的位置
+                // 只需要检查右边界，防止超出chart_right_edge
+                let x_tick = x_tick + left_y_axis_width;
+                if x_tick <= chart_right_edge {
                     if let Some(min_y) = y.tick(&min_price_value) {
                         // marker_x 是K线的中心位置
                         let marker_x = x_tick + band_width / 2.0;
@@ -864,7 +876,6 @@ where
                 let arrow_offset = 10.0; // 箭头与图表右边缘的距离
 
                 // 绘制向左指向的箭头（在右侧Y轴标签区域内，指向最新价）
-                let chart_right_edge = left_y_axis_width + width; // 图表右边缘位置
                 let arrow_left_x = chart_right_edge + arrow_offset; // 箭头左侧位置（在右侧Y轴标签区域内）
                 let arrow_tip = origin_point(px(chart_right_edge), px(latest_y), origin); // 箭头尖端指向图表右边缘（最新价位置）
                 let arrow_top =
@@ -921,7 +932,6 @@ where
             // 绘制水平线（从左到右）- 使用虚线
             let mut hline_builder = PathBuilder::stroke(px(1.5)).dash_array(&[px(4.0), px(2.0)]); // 虚线样式：4像素实线，2像素空白
             let chart_left_edge = left_y_axis_width; // 图表左边缘位置
-            let chart_right_edge = left_y_axis_width + width; // 图表右边缘位置
             let hline_start = origin_point(px(chart_left_edge), cy_pos, origin);
             let hline_end = origin_point(px(chart_right_edge), cy_pos, origin);
             hline_builder.move_to(hline_start);
@@ -1255,7 +1265,7 @@ impl Element for VolumeChart {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // 与主图K线图保持一致：减去左右Y轴标签宽度，确保X轴对齐
+        // 与主图K线图保持一致：减去右侧Y轴标签宽度，确保X轴对齐
         let total_width = bounds.size.width.as_f32();
         let y_label_width = 50.0; // Y轴标签区域宽度（左右两侧各50）
                                   // 根据是否显示左侧Y轴标签区域调整宽度计算
@@ -1264,16 +1274,18 @@ impl Element for VolumeChart {
         } else {
             0.0
         };
-        let chart_width = total_width - left_y_axis_width - y_label_width; // 图表实际宽度（中间区域，不包含左右Y轴标签区域）
+        // 图表实际宽度：始终只减去右侧Y轴标签宽度，左侧标签不影响内容区域宽度
+        let chart_right_edge = total_width - y_label_width; // 图表右边缘位置（不包含右侧Y轴标签区域）
 
         let height = bounds.size.height.as_f32();
         let chart_height = height; // 使用全部高度，不预留X轴标签空间
 
         // X scale - 与主图一致，从左侧Y轴标签区域后开始
+        // 右边界始终是 total_width - y_label_width（减去右侧Y轴标签区域）
         let x_fn = |d: &StockData| d.date.clone();
         let x = ScaleBand::new(
             self.data.iter().map(|v| x_fn(v)).collect(),
-            vec![left_y_axis_width, left_y_axis_width + chart_width],
+            vec![left_y_axis_width, chart_right_edge],
         )
         .padding_inner(0.3)
         .padding_outer(0.1);
@@ -1444,7 +1456,7 @@ impl Element for VolumeChart {
         }
 
         // 右侧分隔线（Y轴标签区域左边缘）
-        let right_divider_x = left_y_axis_width + chart_width;
+        let right_divider_x = chart_right_edge;
         let mut right_divider_builder = PathBuilder::stroke(px(1.0));
         let right_divider_start = origin_point(px(right_divider_x), px(0.0), origin);
         let right_divider_end = origin_point(px(right_divider_x), px(height), origin);
@@ -1459,7 +1471,7 @@ impl Element for VolumeChart {
         let chart_bounds = gpui::Bounds {
             origin: origin_point(px(left_y_axis_width), px(0.0), bounds.origin),
             size: gpui::Size {
-                width: px(chart_width), // 只使用图表宽度，不包含左右Y轴标签区域
+                width: px(chart_right_edge - left_y_axis_width), // 图表宽度：从左侧标签到右侧标签
                 height: bounds.size.height,
             },
         };
@@ -1476,8 +1488,10 @@ impl Element for VolumeChart {
 
         for d in &self.data {
             if let Some(x_tick) = x.tick(&x_fn(d)) {
-                // 确保x_tick在图表区域内（不小于left_y_axis_width）
-                if x_tick >= left_y_axis_width {
+                // ScaleBand已经处理了left_y_axis_width的偏移，x_tick已经是正确的位置
+                // 只需要检查右边界，防止超出chart_right_edge
+                let x_tick = x_tick + left_y_axis_width;
+                if x_tick <= chart_right_edge {
                     if let Some(volume_y) = y.tick(&(d.volume as f64)) {
                         let bar_x = x_tick + band_width * 0.1;
                         let bar_width = band_width * 0.8;
@@ -1527,6 +1541,7 @@ impl Element for VolumeChart {
             let local_x = global_x - bounds_x_start;
             for d in &self.data {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
+                    let x_tick = x_tick + left_y_axis_width;
                     let band_start = x_tick;
                     let band_end = x_tick + band_width;
                     if local_x >= band_start && local_x <= band_end {
@@ -1648,7 +1663,7 @@ impl Element for MacdChart {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // 与主图K线图保持一致：减去左右Y轴标签宽度，确保X轴对齐
+        // 与主图K线图保持一致：减去右侧Y轴标签宽度，确保X轴对齐
         let total_width = bounds.size.width.as_f32();
         let y_label_width = 50.0; // Y轴标签区域宽度（左右两侧各50）
                                   // 根据是否显示左侧Y轴标签区域调整宽度计算
@@ -1657,17 +1672,19 @@ impl Element for MacdChart {
         } else {
             0.0
         };
-        let chart_width = total_width - left_y_axis_width - y_label_width; // 图表实际宽度（中间区域，不包含左右Y轴标签区域）
+        // 图表实际宽度：始终只减去右侧Y轴标签宽度，左侧标签不影响内容区域宽度
+        let chart_right_edge = total_width - y_label_width; // 图表右边缘位置（不包含右侧Y轴标签区域）
 
         let origin = bounds.origin;
         let height = bounds.size.height.as_f32();
         let chart_height = height; // 使用全部高度，不预留X轴标签空间
 
         // X scale - 与主图一致，从左侧Y轴标签区域后开始
+        // 右边界始终是 total_width - y_label_width（减去右侧Y轴标签区域）
         let x_fn = |d: &StockData| d.date.clone();
         let x = ScaleBand::new(
             self.data.iter().map(|v| x_fn(v)).collect(),
-            vec![left_y_axis_width, left_y_axis_width + chart_width],
+            vec![left_y_axis_width, chart_right_edge],
         )
         .padding_inner(0.3)
         .padding_outer(0.1);
@@ -1707,6 +1724,7 @@ impl Element for MacdChart {
             if let Some(macd_val) = self.macd_data.macd.get(i).and_then(|v| *v) {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
                     // 确保x_tick在图表区域内（不小于left_y_axis_width）
+                    let x_tick = x_tick + left_y_axis_width;
                     if x_tick >= left_y_axis_width {
                         if let Some(macd_y) = y.tick(&macd_val) {
                             let bar_x = x_tick + band_width * 0.1;
@@ -1751,6 +1769,7 @@ impl Element for MacdChart {
             if let Some(dif_val) = self.macd_data.dif.get(i).and_then(|v| *v) {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
                     // 确保x_tick在图表区域内（不小于left_y_axis_width）
+                    let x_tick = x_tick + left_y_axis_width;
                     if x_tick >= left_y_axis_width {
                         if let Some(dif_y) = y.tick(&dif_val) {
                             let point =
@@ -1780,6 +1799,7 @@ impl Element for MacdChart {
             if let Some(dea_val) = self.macd_data.dea.get(i).and_then(|v| *v) {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
                     // 确保x_tick在图表区域内（不小于left_y_axis_width）
+                    let x_tick = x_tick + left_y_axis_width;
                     if x_tick >= left_y_axis_width {
                         if let Some(dea_y) = y.tick(&dea_val) {
                             let point =
@@ -1805,7 +1825,6 @@ impl Element for MacdChart {
         let zero_line_color = cx.theme().border;
         let mut zero_builder = PathBuilder::stroke(px(1.0));
         let chart_left_edge = left_y_axis_width; // 图表左边缘位置
-        let chart_right_edge = left_y_axis_width + chart_width; // 图表右边缘位置
         let zero_start = origin_point(px(chart_left_edge), px(zero_y), origin);
         let zero_end = origin_point(px(chart_right_edge), px(zero_y), origin);
         zero_builder.move_to(zero_start);
@@ -1919,7 +1938,7 @@ impl Element for MacdChart {
         }
 
         // 右侧分隔线（Y轴标签区域左边缘）
-        let right_divider_x = left_y_axis_width + chart_width;
+        let right_divider_x = chart_right_edge;
         let mut right_divider_builder = PathBuilder::stroke(px(1.0));
         let right_divider_start = origin_point(px(right_divider_x), px(0.0), origin);
         let right_divider_end = origin_point(px(right_divider_x), px(height), origin);
@@ -1934,7 +1953,7 @@ impl Element for MacdChart {
         let chart_bounds = gpui::Bounds {
             origin: origin_point(px(left_y_axis_width), px(0.0), bounds.origin),
             size: gpui::Size {
-                width: px(chart_width), // 只使用图表宽度，不包含左右Y轴标签区域
+                width: px(chart_right_edge - left_y_axis_width), // 图表宽度：从左侧标签到右侧标签
                 height: bounds.size.height,
             },
         };
@@ -1958,6 +1977,7 @@ impl Element for MacdChart {
             let local_x = global_x - bounds_x_start;
             for d in &self.data {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
+                    let x_tick = x_tick + left_y_axis_width;
                     let band_start = x_tick;
                     let band_end = x_tick + band_width;
                     if local_x >= band_start && local_x <= band_end {
@@ -2246,6 +2266,7 @@ pub struct Example {
     stock_data: Vec<StockData>,
     loading: bool,
     cache: Option<StockDataCache>,
+    show_left_y_axis: bool, // 是否显示左侧Y轴标签
 }
 
 impl Example {
@@ -2254,6 +2275,7 @@ impl Example {
             stock_data: Vec::new(),
             loading: true,
             cache: None,
+            show_left_y_axis: false, // 默认不显示左侧Y轴标签
         };
 
         // 先尝试从文件加载缓存
@@ -2356,26 +2378,53 @@ impl Render for Example {
             .size_full()
             .child(
                 StockChart::new(self.stock_data.clone())
-                    .show_left_y_axis(false) // 统一的左侧Y轴显示开关
+                    .show_left_y_axis(self.show_left_y_axis) // 使用状态变量
                     .build(cx),
             )
-            .child(Button::new("ok").primary().label("刷新数据").on_click({
-                let view_handle = cx.entity().downgrade();
-                move |_, window, cx| {
-                    if let Some(view) = view_handle.upgrade() {
-                        view.update(cx, |view, cx| {
-                            view.loading = true;
-                            // 清除内存缓存和文件缓存，强制重新获取数据
-                            view.cache = None;
-                            // 删除文件缓存
-                            let symbol = "AAPL";
-                            let cache_path = cache_file_path(symbol);
-                            let _ = std::fs::remove_file(&cache_path);
-                            view.load_stock_data(window, cx);
-                        });
-                    }
-                }
-            }))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("refresh")
+                            .primary()
+                            .label("刷新数据")
+                            .on_click({
+                                let view_handle = cx.entity().downgrade();
+                                move |_, window, cx| {
+                                    if let Some(view) = view_handle.upgrade() {
+                                        view.update(cx, |view, cx| {
+                                            view.loading = true;
+                                            // 清除内存缓存和文件缓存，强制重新获取数据
+                                            view.cache = None;
+                                            // 删除文件缓存
+                                            let symbol = "AAPL";
+                                            let cache_path = cache_file_path(symbol);
+                                            let _ = std::fs::remove_file(&cache_path);
+                                            view.load_stock_data(window, cx);
+                                        });
+                                    }
+                                }
+                            }),
+                    )
+                    .child(
+                        Button::new("toggle_left_y_axis")
+                            .label(if self.show_left_y_axis {
+                                "隐藏左侧标签"
+                            } else {
+                                "显示左侧标签"
+                            })
+                            .on_click({
+                                let view_handle = cx.entity().downgrade();
+                                move |_, _, cx| {
+                                    if let Some(view) = view_handle.upgrade() {
+                                        view.update(cx, |view, _| {
+                                            view.show_left_y_axis = !view.show_left_y_axis;
+                                        });
+                                    }
+                                }
+                            }),
+                    ),
+            )
     }
 }
 
