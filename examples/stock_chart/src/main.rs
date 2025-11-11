@@ -2015,121 +2015,60 @@ impl StockChart {
         self.show_left_y_axis = show;
         self
     }
-}
 
-impl IntoElement for StockChart {
-    type Element = Self;
+    /// 构建布局元素（在render时调用）
+    pub fn build(&self, cx: &mut Context<impl Render>) -> impl IntoElement {
+        let show_left_y_axis = self.show_left_y_axis;
+        let data = self.data.clone();
 
-    fn into_element(self) -> Self::Element {
-        self
+        v_flex()
+            .gap_4()
+            .size_full()
+            .p_4()
+            .child(div().font_semibold().text_lg().child("股票 K 线图"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(300.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_lg()
+                    .p_4()
+                    .child(
+                        CandlestickChart::new(data.clone())
+                            .x(|d| d.date.clone())
+                            .open(|d| d.open)
+                            .high(|d| d.high)
+                            .low(|d| d.low)
+                            .close(|d| d.close)
+                            .tick_margin(3)
+                            .show_left_y_axis(show_left_y_axis),
+                    ),
+            )
+            .child({
+                let success_color = cx.theme().success.opacity(0.7);
+                let danger_color = cx.theme().danger.opacity(0.7);
+                div()
+                    .h(px(150.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_lg()
+                    .p_4()
+                    .child(
+                        VolumeChart::new(data.clone(), success_color, danger_color)
+                            .show_left_y_axis(show_left_y_axis),
+                    )
+            })
+            .child({
+                div()
+                    .h(px(150.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_lg()
+                    .p_4()
+                    .child(MacdChart::new(data).show_left_y_axis(show_left_y_axis))
+            })
     }
-}
-
-impl Element for StockChart {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, Self::RequestLayoutState) {
-        let style = Style {
-            size: gpui::Size::full(),
-            ..Default::default()
-        };
-        (window.request_layout(style, None, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        _: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        _: &mut Window,
-        _: &mut App,
-    ) -> Self::PrepaintState {
-    }
-
-    fn paint(
-        &mut self,
-        _: Option<&GlobalElementId>,
-        _: Option<&InspectorElementId>,
-        bounds: Bounds<Pixels>,
-        _: &mut Self::RequestLayoutState,
-        _: &mut Self::PrepaintState,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        // 这个组件不直接绘制，而是通过子组件绘制
-        // 实际的绘制逻辑在子组件中
-    }
-}
-
-fn stock_chart(data: Vec<StockData>, cx: &mut Context<Example>) -> impl IntoElement {
-    // 统一的左侧Y轴显示开关（主图和幅图联动）
-    let show_left_y_axis = false;
-
-    v_flex()
-        .gap_4()
-        .size_full()
-        .p_4()
-        .child(div().font_semibold().text_lg().child("股票 K 线图"))
-        .child(
-            div()
-                .flex_1()
-                .min_h(px(300.))
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded_lg()
-                .p_4()
-                .child(
-                    CandlestickChart::new(data.clone())
-                        .x(|d| d.date.clone())
-                        .open(|d| d.open)
-                        .high(|d| d.high)
-                        .low(|d| d.low)
-                        .close(|d| d.close)
-                        .tick_margin(3)
-                        .show_left_y_axis(show_left_y_axis), // 使用统一的开关
-                ),
-        )
-        .child({
-            let success_color = cx.theme().success.opacity(0.7);
-            let danger_color = cx.theme().danger.opacity(0.7);
-            div()
-                .h(px(150.))
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded_lg()
-                .p_4()
-                .child(
-                    VolumeChart::new(data.clone(), success_color, danger_color)
-                        .show_left_y_axis(show_left_y_axis), // 使用统一的开关
-                )
-        })
-        .child({
-            div()
-                .h(px(150.))
-                .border_1()
-                .border_color(cx.theme().border)
-                .rounded_lg()
-                .p_4()
-                .child(
-                    MacdChart::new(data).show_left_y_axis(show_left_y_axis), // 使用统一的开关
-                )
-        })
 }
 
 // 生成示例股票数据（使用伪随机数生成器，不依赖外部库）
@@ -2415,7 +2354,11 @@ impl Render for Example {
             .v_flex()
             .gap_2()
             .size_full()
-            .child(stock_chart(self.stock_data.clone(), cx))
+            .child(
+                StockChart::new(self.stock_data.clone())
+                    .show_left_y_axis(false) // 统一的左侧Y轴显示开关
+                    .build(cx),
+            )
             .child(Button::new("ok").primary().label("刷新数据").on_click({
                 let view_handle = cx.entity().downgrade();
                 move |_, window, cx| {
