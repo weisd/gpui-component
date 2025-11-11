@@ -1,6 +1,5 @@
 use chrono::Datelike;
 use gpui::*;
-use gpui_component::chart::BarChart;
 use gpui_component::plot::label::{Text, TEXT_GAP, TEXT_SIZE};
 use gpui_component::plot::{origin_point, scale::*, AxisText, Grid, Label, Plot};
 use gpui_component::{button::*, *};
@@ -454,6 +453,9 @@ where
             }
         }
 
+        // 收集网格线的Y坐标（在绘制Y轴标签之前）
+        let grid_y_positions: Vec<f32> = y_labels.iter().map(|label| label.tick.as_f32()).collect();
+
         // 在右侧绘制Y轴标签，使用point传递相对坐标（Label::paint会自动加上bounds.origin）
         // Y轴标签的Y坐标应该与K线图的价格值对齐
         // 注意：文本的origin是基线位置（底部），需要调整Y坐标使文本中心与价格线对齐
@@ -486,12 +488,20 @@ where
         let y_label = Label::new(y_label_items);
         y_label.paint(&bounds, window, cx);
 
-        // 绘制网格
+        // 绘制网格 - 网格线对应Y轴标签值，不超出Y轴标签区域
+        // 创建只包含图表区域的bounds（不包含Y轴标签区域）
+        let chart_bounds = gpui::Bounds {
+            origin: bounds.origin,
+            size: gpui::Size {
+                width: px(width), // 只使用图表宽度，不包含Y轴标签区域
+                height: bounds.size.height,
+            },
+        };
         Grid::new()
-            .y((0..=3).map(|i| height * i as f32 / 4.0).collect())
+            .y(grid_y_positions)
             .stroke(cx.theme().border)
             .dash_array(&[px(4.), px(2.)])
-            .paint(&bounds, window);
+            .paint(&chart_bounds, window);
 
         // 绘制均线（在蜡烛之前绘制，这样蜡烛会覆盖均线）
         // 均线值已在Y轴scale计算时计算过了
@@ -764,6 +774,53 @@ where
                     }]);
                     price_label.paint(&bounds, window, cx);
                 }
+            }
+        }
+
+        // 绘制最新价格标记（最后一根K线的收盘价）- 显示在Y轴标签区域内
+        if let Some(latest_data) = self.data.last() {
+            let latest_price = close_fn(latest_data);
+            if let Some(latest_y) = y.tick(&latest_price) {
+                let arrow_size = 8.0;
+                let arrow_offset = 10.0; // 箭头与图表右边缘的距离
+
+                // 绘制向左指向的箭头（在Y轴标签区域内，指向最新价）
+                let arrow_left_x = width + arrow_offset; // 箭头左侧位置（在Y轴标签区域内）
+                let arrow_tip = origin_point(px(width), px(latest_y), origin); // 箭头尖端指向图表右边缘（最新价位置）
+                let arrow_top =
+                    origin_point(px(arrow_left_x), px(latest_y - arrow_size / 2.0), origin);
+                let arrow_bottom =
+                    origin_point(px(arrow_left_x), px(latest_y + arrow_size / 2.0), origin);
+
+                // 绘制箭头三角形（填充）
+                // 使用主题颜色，根据涨跌决定颜色
+                let arrow_color = if latest_price > open_fn(latest_data) {
+                    danger_color // 上涨用红色
+                } else {
+                    success_color // 下跌用绿色
+                };
+                let mut arrow_builder = PathBuilder::fill();
+                arrow_builder.move_to(arrow_tip);
+                arrow_builder.line_to(arrow_top);
+                arrow_builder.line_to(arrow_bottom);
+                arrow_builder.line_to(arrow_tip);
+                if let Ok(arrow_path) = arrow_builder.build() {
+                    window.paint_path(arrow_path, Background::from(arrow_color));
+                }
+
+                // 绘制价格标签（在箭头左侧）
+                let label_text = format!("{:.2}", latest_price);
+                let label_center_x = arrow_left_x + 5.0; // 标签在箭头左侧
+                let text_baseline_y = latest_y - TEXT_SIZE / 2.0; // 文本中心与价格对齐
+                let price_label = Label::new(vec![Text {
+                    text: label_text.into(),
+                    origin: point(px(label_center_x), px(text_baseline_y)),
+                    color: arrow_color,
+                    font_size: px(10.0),
+                    font_weight: gpui::FontWeight::SEMIBOLD,
+                    align: TextAlign::Left,
+                }]);
+                price_label.paint(&bounds, window, cx);
             }
         }
 
@@ -1123,63 +1180,103 @@ impl Element for VolumeChart {
             .fold(f64::NEG_INFINITY, f64::max);
         let volume_range = max_volume - min_volume;
         let margin = volume_range * 0.05;
-        let domain_min = (min_volume - margin).max(0.0);
+        // 确保domain_min从0开始
+        let domain_min = 0.0;
         let domain_max = max_volume + margin;
 
         let y = ScaleLinear::new(vec![domain_min, domain_max], vec![chart_height, 10.]);
 
-        // 绘制Y轴标签（成交量）- 只显示4个值，与网格线对齐
+        // 绘制Y轴标签（成交量）- 只显示4个值，与网格线对齐，从0开始，尽量使用整数
         use gpui::point;
         use gpui::TextAlign;
         use gpui_component::plot::label::{Text, TEXT_GAP, TEXT_SIZE};
         use gpui_component::plot::{AxisText, Label};
 
-        // 计算4个与网格线对齐的标签值
-        // 网格线的Y坐标是 chart_height * i / 4.0 (i从0到3)
-        // 需要找到对应的volume值，使得y.tick(&volume_value)与网格线Y坐标对齐
-        let label_count = 4;
-        let mut volume_labels: Vec<AxisText> = Vec::new();
-        for i in 0..label_count {
-            // 网格线的Y坐标（从底部到顶部）
-            let grid_y = chart_height * i as f32 / (label_count - 1) as f32;
-            // 从Y坐标反推对应的volume值
-            // ScaleLinear映射：domain_min -> chart_height, domain_max -> 10.0
-            // 所以：value = domain_min + (domain_max - domain_min) * (1.0 - (y - 10.0) / (chart_height - 10.0))
-            let ratio = if chart_height > 10.0 {
-                (grid_y - 10.0) / (chart_height - 10.0)
+        // 辅助函数：将值取整到合适的整数
+        fn round_to_nice_integer(value: f64, max_value: f64) -> f64 {
+            if value <= 0.0 {
+                return 0.0;
+            }
+            if value >= max_value {
+                return max_value;
+            }
+            // 根据最大值确定取整单位
+            if max_value <= 0.0 {
+                return value;
+            }
+            let magnitude = max_value.log10().floor();
+            let base_unit = if magnitude <= 0.0 {
+                1.0 // 如果最大值小于10，使用1作为取整单位
             } else {
-                0.0
+                10_f64.powi(magnitude as i32 - 1) // 例如：1000000 -> 100000, 100000 -> 10000
             };
-            let volume_value = domain_min + (domain_max - domain_min) * (1.0 - ratio as f64);
+            // 取整到base_unit的倍数，但不超过max_value
+            let rounded = (value / base_unit).ceil() * base_unit;
+            rounded.min(max_value)
+        }
+
+        // 计算4个均匀分布的标签值，第一个值从0开始，其他值尽量使用整数
+        let label_count = 4;
+        let mut volume_labels: Vec<(AxisText, f32)> = Vec::new(); // 存储标签和对应的Y坐标
+
+        // 先计算均匀分布的volume值（0, max/3, 2*max/3, max），然后取整
+        for i in 0..label_count {
+            let volume_value = if i == 0 {
+                // 第一个标签（底部）始终为0
+                0.0
+            } else if i == label_count - 1 {
+                // 最后一个标签显示最大值（取整后的最大值）
+                round_to_nice_integer(domain_max, domain_max)
+            } else {
+                // 计算均匀分布的volume值
+                let ratio = i as f64 / (label_count - 1) as f64;
+                let raw_value = domain_min + (domain_max - domain_min) * ratio;
+                // 将值取整到合适的整数
+                round_to_nice_integer(raw_value, domain_max)
+            };
+
+            // 根据取整后的值计算对应的Y坐标
+            let actual_grid_y = if volume_value <= domain_min {
+                chart_height
+            } else if volume_value >= domain_max {
+                10.0
+            } else {
+                // 反向映射：value -> Y坐标
+                // ScaleLinear映射：domain_min (0.0) -> chart_height（底部）, domain_max -> 10.0（顶部）
+                // 所以：ratio = (volume_value - domain_min) / (domain_max - domain_min)
+                // Y = chart_height - (chart_height - 10.0) * ratio
+                let ratio = (volume_value - domain_min) / (domain_max - domain_min);
+                chart_height - (chart_height - 10.0) * ratio as f32
+            };
 
             // 优化成交量单位显示：统一使用合适的单位
             let volume_text = if volume_value >= 1_000_000_000.0 {
-                format!("{:.1}亿", volume_value / 100_000_000.0)
+                format!("{:.0}亿", volume_value / 100_000_000.0)
             } else if volume_value >= 10_000.0 {
-                format!("{:.1}万", volume_value / 10_000.0)
+                format!("{:.0}万", volume_value / 10_000.0)
             } else if volume_value >= 1_000.0 {
-                format!("{:.1}千", volume_value / 1_000.0)
+                format!("{:.0}千", volume_value / 1_000.0)
             } else {
                 format!("{:.0}", volume_value)
             };
-            volume_labels.push(
-                AxisText::new(volume_text, grid_y, cx.theme().muted_foreground)
+            volume_labels.push((
+                AxisText::new(volume_text, actual_grid_y, cx.theme().muted_foreground)
                     .align(TextAlign::Right),
-            );
+                actual_grid_y,
+            ));
         }
 
-        // 收集网格线的Y坐标（在绘制Y轴标签之前）
-        let grid_y_positions: Vec<f32> = volume_labels
-            .iter()
-            .map(|label| label.tick.as_f32())
-            .collect();
+        // 收集网格线的Y坐标（使用取整后值对应的实际Y坐标）
+        // 按Y坐标从大到小排序（从底部到顶部），确保标签值从下往上递增
+        volume_labels.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let grid_y_positions: Vec<f32> = volume_labels.iter().map(|(_, grid_y)| *grid_y).collect();
 
         // 绘制成交量Y轴标签
         let volume_label_items: Vec<Text> = volume_labels
             .into_iter()
-            .map(|t| {
-                // Y轴标签的Y坐标直接使用网格线的Y坐标，确保与网格线对齐
-                let y_tick_f32 = t.tick.as_f32();
+            .map(|(t, actual_grid_y)| {
+                // Y轴标签的Y坐标使用取整后值对应的实际Y坐标，确保与网格线对齐
+                let y_tick_f32 = actual_grid_y;
                 // 确保Y坐标在图表绘制区域内（不超出bounds）
                 let clamped_y = y_tick_f32.max(10.0).min(chart_height);
                 // 文本的origin是基线位置（底部），需要调整Y坐标使文本中心与网格线对齐
@@ -1198,12 +1295,20 @@ impl Element for VolumeChart {
         let volume_label = Label::new(volume_label_items);
         volume_label.paint(&bounds, window, cx);
 
-        // 绘制网格（不绘制X轴）- 网格线对应Y轴标签值
+        // 绘制网格（不绘制X轴）- 网格线对应Y轴标签值，不超出Y轴标签区域
+        // 创建只包含图表区域的bounds（不包含Y轴标签区域）
+        let chart_bounds = gpui::Bounds {
+            origin: bounds.origin,
+            size: gpui::Size {
+                width: px(chart_width), // 只使用图表宽度，不包含Y轴标签区域
+                height: bounds.size.height,
+            },
+        };
         Grid::new()
             .y(grid_y_positions)
             .stroke(cx.theme().border)
             .dash_array(&[px(4.), px(2.)])
-            .paint(&bounds, window);
+            .paint(&chart_bounds, window);
 
         // 手动绘制柱状图（不绘制X轴标签）
         let success_color = cx.theme().success.opacity(0.7);
@@ -1573,12 +1678,20 @@ impl Element for MacdChart {
         let macd_label = Label::new(macd_label_items);
         macd_label.paint(&bounds, window, cx);
 
-        // 绘制网格 - 网格线对应Y轴标签值
+        // 绘制网格 - 网格线对应Y轴标签值，不超出Y轴标签区域
+        // 创建只包含图表区域的bounds（不包含Y轴标签区域）
+        let chart_bounds = gpui::Bounds {
+            origin: bounds.origin,
+            size: gpui::Size {
+                width: px(chart_width), // 只使用图表宽度，不包含Y轴标签区域
+                height: bounds.size.height,
+            },
+        };
         Grid::new()
             .y(grid_y_positions)
             .stroke(cx.theme().border)
             .dash_array(&[px(4.), px(2.)])
-            .paint(&bounds, window);
+            .paint(&chart_bounds, window);
 
         // 绘制X轴（使用BarChart的Axis组件）
         let data_len = self.data.len();

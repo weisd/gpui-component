@@ -1,0 +1,21 @@
+[package]
+edition = "2021"
+name = "kline_chart"
+description = "A K-line chart example inspired by Longbridge Pro."
+publish = false
+version = "0.4.0-preview1"
+
+[dependencies]
+anyhow.workspace = true
+gpui.workspace = true
+gpui-component = { workspace = true }
+reqwest_client = { path = "../../crates/reqwest_client" }
+reqwest = { version = "0.12.15-zed", package = "zed-reqwest" }
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+chrono = "0.4"
+futures = "0.3"
+
+[lints]
+workspace = true
+

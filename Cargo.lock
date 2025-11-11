@@ -3852,6 +3852,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kline_chart"
+version = "0.4.0-preview1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "futures",
+ "gpui",
+ "gpui-component",
+ "reqwest_client",
+ "serde",
+ "serde_json",
+ "zed-reqwest",
+]
+
+[[package]]
 name = "kqueue"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
