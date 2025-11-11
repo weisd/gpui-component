@@ -2016,6 +2016,253 @@ impl Element for MacdChart {
     }
 }
 
+// K线信息面板组件（显示光标所在K线或最新K线的数据）
+struct KLineInfoPanel {
+    data: Vec<StockData>,
+    show_left_y_axis: bool, // 用于计算X scale范围
+}
+
+impl KLineInfoPanel {
+    fn new(data: Vec<StockData>) -> Self {
+        Self {
+            data,
+            show_left_y_axis: false,
+        }
+    }
+
+    fn show_left_y_axis(mut self, show: bool) -> Self {
+        self.show_left_y_axis = show;
+        self
+    }
+}
+
+impl IntoElement for KLineInfoPanel {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for KLineInfoPanel {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some(ElementId::from("kline_info_panel"))
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let style = Style {
+            size: gpui::Size {
+                width: relative(1.0).into(),
+                height: px(80.0).into(),
+            },
+            ..Default::default()
+        };
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if self.data.is_empty() {
+            return;
+        }
+
+        // 获取鼠标位置，查找对应的K线数据
+        let mouse_pos = window.mouse_position();
+        let mut selected_data = None;
+
+        // 计算X scale（与CandlestickChart保持一致）
+        let total_width = bounds.size.width.as_f32();
+        let y_label_width = 50.0;
+        let left_y_axis_width = if self.show_left_y_axis {
+            y_label_width
+        } else {
+            0.0
+        };
+        let chart_right_edge = total_width - y_label_width;
+
+        let x_fn = |d: &StockData| d.date.clone();
+        let x = ScaleBand::new(
+            self.data.iter().map(|v| x_fn(v)).collect(),
+            vec![left_y_axis_width, chart_right_edge],
+        )
+        .padding_inner(0.3)
+        .padding_outer(0.1);
+        let band_width = x.band_width();
+
+        // 尝试根据鼠标位置查找对应的K线
+        // 由于我们无法直接访问K线图的bounds，我们使用一个简化的方法：
+        // 假设鼠标在窗口内，且Y坐标大于信息面板高度时，可能在K线图内
+        // 根据鼠标X位置计算对应的K线
+        let local_x = (mouse_pos.x - bounds.origin.x).as_f32();
+        // 调整X坐标，考虑left_y_axis_width（如果鼠标在K线图区域内）
+        let adjusted_x = local_x - left_y_axis_width;
+
+        // 查找对应的K线（只在X坐标在合理范围内时）
+        if adjusted_x >= 0.0 && adjusted_x <= chart_right_edge - left_y_axis_width {
+            for d in &self.data {
+                if let Some(x_tick) = x.tick(&x_fn(d)) {
+                    let band_start = x_tick;
+                    let band_end = x_tick + band_width;
+                    if adjusted_x >= band_start && adjusted_x <= band_end {
+                        selected_data = Some(d);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // 如果找到了选中的数据，显示它；否则显示最新数据
+        let display_data = selected_data.unwrap_or_else(|| self.data.last().unwrap());
+
+        // 计算成交额（成交额 = 成交量 * 平均价）
+        let avg_price = (display_data.open + display_data.close) / 2.0;
+        let amount = display_data.volume as f64 * avg_price;
+
+        // 格式化数据
+        let date_text = format!("日期: {}", display_data.date);
+        let open_text = format!("开盘: {:.2}", display_data.open);
+        let high_text = format!("最高: {:.2}", display_data.high);
+        let low_text = format!("最低: {:.2}", display_data.low);
+        let volume_text = format!("成交量: {}", format_volume(display_data.volume as f64));
+        let amount_text = format!("成交额: {}", format_amount(amount));
+
+        // 判断涨跌
+        let is_up = display_data.close > display_data.open;
+        let change_color = if is_up {
+            cx.theme().danger // 上涨用红色
+        } else {
+            cx.theme().success // 下跌用绿色
+        };
+
+        // 绘制背景
+        let bg_color = cx.theme().background.opacity(0.95);
+        window.paint_quad(fill(bounds, bg_color));
+
+        // 绘制边框
+        let border_color = cx.theme().border;
+        let mut border_builder = PathBuilder::stroke(px(1.0));
+        let border_tl = bounds.origin;
+        let border_tr = point(bounds.right(), bounds.top());
+        let border_br = point(bounds.right(), bounds.bottom());
+        let border_bl = point(bounds.left(), bounds.bottom());
+        border_builder.move_to(border_tl);
+        border_builder.line_to(border_tr);
+        border_builder.line_to(border_br);
+        border_builder.line_to(border_bl);
+        border_builder.line_to(border_tl);
+        if let Ok(border_path) = border_builder.build() {
+            window.paint_path(border_path, Background::from(border_color));
+        }
+
+        use gpui_component::plot::label::{Text, TEXT_GAP};
+        use gpui_component::plot::Label;
+
+        let text_color = cx.theme().foreground;
+        let font_size = px(12.0);
+        let line_height = 18.0;
+        let start_x = TEXT_GAP * 2.0;
+        let mut y_offset = TEXT_GAP * 2.0;
+
+        let mut label_texts = Vec::new();
+
+        // 第一行：日期和收盘价（突出显示）
+        label_texts.push(
+            Text::new(date_text, point(px(start_x), px(y_offset)), text_color).font_size(font_size),
+        );
+        label_texts.push(
+            Text::new(
+                format!("收盘: {:.2}", display_data.close),
+                point(px(start_x + 150.0), px(y_offset)),
+                change_color,
+            )
+            .font_size(font_size)
+            .font_weight(gpui::FontWeight::SEMIBOLD),
+        );
+
+        y_offset += line_height;
+
+        // 第二行：开盘、最高、最低
+        label_texts.push(
+            Text::new(open_text, point(px(start_x), px(y_offset)), text_color).font_size(font_size),
+        );
+        label_texts.push(
+            Text::new(
+                high_text,
+                point(px(start_x + 120.0), px(y_offset)),
+                text_color,
+            )
+            .font_size(font_size),
+        );
+        label_texts.push(
+            Text::new(
+                low_text,
+                point(px(start_x + 240.0), px(y_offset)),
+                text_color,
+            )
+            .font_size(font_size),
+        );
+
+        y_offset += line_height;
+
+        // 第三行：成交量、成交额
+        label_texts.push(
+            Text::new(volume_text, point(px(start_x), px(y_offset)), text_color)
+                .font_size(font_size),
+        );
+        label_texts.push(
+            Text::new(
+                amount_text,
+                point(px(start_x + 200.0), px(y_offset)),
+                text_color,
+            )
+            .font_size(font_size),
+        );
+
+        let label = Label::new(label_texts);
+        label.paint(&bounds, window, cx);
+
+        // 监听鼠标移动事件，触发重绘（与K线图联动）
+        window.on_mouse_event({
+            move |_event: &gpui::MouseMoveEvent, _, window, _cx| {
+                // 如果鼠标在窗口内，触发重绘以更新显示
+                window.refresh();
+            }
+        });
+    }
+}
+
 // 统一的股票图表组件（包含主图和幅图）
 struct StockChart {
     data: Vec<StockData>,
@@ -2046,6 +2293,15 @@ impl StockChart {
             .size_full()
             .p_4()
             .child(div().font_semibold().text_lg().child("股票 K 线图"))
+            .child(
+                div()
+                    .h(px(80.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_lg()
+                    .p_2()
+                    .child(KLineInfoPanel::new(data.clone()).show_left_y_axis(show_left_y_axis)),
+            )
             .child(
                 div()
                     .flex_1()
