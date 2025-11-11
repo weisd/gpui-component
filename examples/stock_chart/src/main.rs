@@ -248,17 +248,20 @@ where
 
         let total_width = bounds.size.width.as_f32();
         let total_height = bounds.size.height.as_f32();
-        // 为Y轴标签单独分配空间，避免与K线重叠
-        let y_label_width = 50.0; // Y轴标签区域宽度（右侧）
-        let width = total_width - y_label_width; // K线图实际宽度（左侧，不包含Y轴标签区域）
-                                                 // 为最低价标签预留底部空间，避免标签被裁剪
+        // 为Y轴标签单独分配空间，避免与K线重叠（左右两侧各分配空间）
+        let y_label_width = 50.0; // Y轴标签区域宽度（左右两侧各50）
+        let width = total_width - y_label_width * 2.0; // K线图实际宽度（中间区域，不包含左右Y轴标签区域）
+                                                       // 为最低价标签预留底部空间，避免标签被裁剪c
         let bottom_margin = TEXT_SIZE + TEXT_GAP * 4.0; // 底部边距（文本高度 + 间距）
         let height = total_height - bottom_margin; // K线图实际高度（减去底部边距）
 
-        // X scale - 使用 ScaleBand 以便蜡烛之间有间距
-        let x = ScaleBand::new(self.data.iter().map(|v| x_fn(v)).collect(), vec![0., width])
-            .padding_inner(0.3)
-            .padding_outer(0.1);
+        // X scale - 使用 ScaleBand 以便蜡烛之间有间距，从左侧Y轴标签区域后开始
+        let x = ScaleBand::new(
+            self.data.iter().map(|v| x_fn(v)).collect(),
+            vec![y_label_width, y_label_width + width],
+        )
+        .padding_inner(0.3)
+        .padding_outer(0.1);
         let band_width = x.band_width();
         let candle_width = (band_width * 0.7).max(4.0); // 蜡烛宽度为 band 的 70%，最小4像素
         let candle_x_offset = (band_width - candle_width) / 2.0;
@@ -308,7 +311,7 @@ where
             let local_x = (mouse_pos.x - bounds.origin.x).as_f32();
             let local_y = (mouse_pos.y - bounds.origin.y).as_f32();
 
-            // 计算对应的数据点索引
+            // 计算对应的数据点索引（需要考虑左侧Y轴标签的偏移）
             for (i, d) in self.data.iter().enumerate() {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
                     let band_start = x_tick;
@@ -456,44 +459,76 @@ where
         // 收集网格线的Y坐标（在绘制Y轴标签之前）
         let grid_y_positions: Vec<f32> = y_labels.iter().map(|label| label.tick.as_f32()).collect();
 
-        // 在右侧绘制Y轴标签，使用point传递相对坐标（Label::paint会自动加上bounds.origin）
+        // 在左右两侧绘制Y轴标签
         // Y轴标签的Y坐标应该与K线图的价格值对齐
         // 注意：文本的origin是基线位置（底部），需要调整Y坐标使文本中心与价格线对齐
         let y_label_items: Vec<Text> = y_labels
-            .into_iter()
-            .map(|t| {
+            .iter()
+            .flat_map(|t| {
                 // Y轴标签的Y坐标直接使用y.tick()返回的值，确保与K线图的价格值对齐
-                // y.tick()返回的Y坐标在[10., height]范围内，对应[domain_max, domain_min]
                 let y_tick_f32 = t.tick.as_f32();
                 // 确保Y坐标在图表绘制区域内（不超出bounds）
                 let clamped_y = y_tick_f32.max(10.0).min(height);
                 // 文本的origin是基线位置（底部），需要调整Y坐标使文本中心与价格线对齐
-                // 文本高度约为TEXT_SIZE，所以文本中心在 origin.y + TEXT_SIZE / 2
-                // 要使文本中心与价格线对齐，需要将origin.y设置为 price_y - TEXT_SIZE / 2
                 let text_baseline_y = clamped_y - TEXT_SIZE / 2.0;
-                // Y轴标签显示在右侧预留区域（K线图右侧）
-                // 使用point传递相对坐标，Label::paint会自动加上bounds.origin
-                // 由于是右对齐，origin.x是文本的右边缘位置，所以应该设置为total_width - TEXT_GAP
-                let y_label_x = total_width - TEXT_GAP; // Y轴标签X位置（预留区域右侧，右对齐）
-                Text {
-                    text: t.text,
-                    origin: point(px(y_label_x), px(text_baseline_y)), // 使用point，传递相对坐标，Y坐标使文本中心与K线图价格值对齐
+
+                // 左侧标签（左对齐）
+                let left_label = Text {
+                    text: t.text.clone(),
+                    origin: point(px(TEXT_GAP), px(text_baseline_y)), // 左侧，左对齐
+                    color: t.color,
+                    font_size: t.font_size,
+                    font_weight: gpui::FontWeight::NORMAL,
+                    align: TextAlign::Left,
+                };
+
+                // 右侧标签（右对齐）
+                let right_label = Text {
+                    text: t.text.clone(),
+                    origin: point(px(total_width - TEXT_GAP), px(text_baseline_y)), // 右侧，右对齐
                     color: t.color,
                     font_size: t.font_size,
                     font_weight: gpui::FontWeight::NORMAL,
                     align: TextAlign::Right,
-                }
+                };
+
+                vec![left_label, right_label]
             })
             .collect();
         let y_label = Label::new(y_label_items);
         y_label.paint(&bounds, window, cx);
 
+        // 绘制Y轴标签区域与内容区域之间的分隔线（左右两侧）
+        let border_color = cx.theme().border;
+
+        // 左侧分隔线（Y轴标签区域右边缘）
+        let left_divider_x = y_label_width;
+        let mut left_divider_builder = PathBuilder::stroke(px(1.0));
+        let left_divider_start = origin_point(px(left_divider_x), px(0.0), bounds.origin);
+        let left_divider_end = origin_point(px(left_divider_x), px(total_height), bounds.origin);
+        left_divider_builder.move_to(left_divider_start);
+        left_divider_builder.line_to(left_divider_end);
+        if let Ok(left_divider_path) = left_divider_builder.build() {
+            window.paint_path(left_divider_path, Background::from(border_color));
+        }
+
+        // 右侧分隔线（Y轴标签区域左边缘）
+        let right_divider_x = y_label_width + width;
+        let mut right_divider_builder = PathBuilder::stroke(px(1.0));
+        let right_divider_start = origin_point(px(right_divider_x), px(0.0), bounds.origin);
+        let right_divider_end = origin_point(px(right_divider_x), px(total_height), bounds.origin);
+        right_divider_builder.move_to(right_divider_start);
+        right_divider_builder.line_to(right_divider_end);
+        if let Ok(right_divider_path) = right_divider_builder.build() {
+            window.paint_path(right_divider_path, Background::from(border_color));
+        }
+
         // 绘制网格 - 网格线对应Y轴标签值，不超出Y轴标签区域
-        // 创建只包含图表区域的bounds（不包含Y轴标签区域）
+        // 创建只包含图表区域的bounds（不包含左右Y轴标签区域）
         let chart_bounds = gpui::Bounds {
-            origin: bounds.origin,
+            origin: origin_point(px(y_label_width), px(0.0), bounds.origin),
             size: gpui::Size {
-                width: px(width), // 只使用图表宽度，不包含Y轴标签区域
+                width: px(width), // 只使用图表宽度，不包含左右Y轴标签区域
                 height: bounds.size.height,
             },
         };
@@ -526,15 +561,19 @@ where
             for (i, d) in self.data.iter().enumerate() {
                 if let Some(ma_value) = ma_values.get(i).and_then(|v| *v) {
                     if let Some(x_tick) = x.tick(&x_fn(d)) {
-                        if let Some(ma_y_f32) = y.tick(&ma_value) {
-                            let ma_y = px(ma_y_f32);
-                            let point = origin_point(px(x_tick + band_width / 2.0), ma_y, origin);
+                        // 确保x_tick在图表区域内（不小于y_label_width）
+                        if x_tick >= y_label_width {
+                            if let Some(ma_y_f32) = y.tick(&ma_value) {
+                                let ma_y = px(ma_y_f32);
+                                let point =
+                                    origin_point(px(x_tick + band_width / 2.0), ma_y, origin);
 
-                            if !has_points {
-                                line_builder.move_to(point);
-                                has_points = true;
-                            } else {
-                                line_builder.line_to(point);
+                                if !has_points {
+                                    line_builder.move_to(point);
+                                    has_points = true;
+                                } else {
+                                    line_builder.line_to(point);
+                                }
                             }
                         }
                     }
@@ -555,6 +594,11 @@ where
         for d in &self.data {
             let x_tick = x.tick(&x_fn(d));
             if let Some(x_tick) = x_tick {
+                // 确保x_tick在图表区域内（不小于y_label_width）
+                if x_tick < y_label_width {
+                    continue;
+                }
+
                 let open = open_fn(d);
                 let high = high_fn(d);
                 let low = low_fn(d);
@@ -687,45 +731,48 @@ where
             // 确保使用正确的数据来获取x_tick
             let x_value = x_fn(max_data);
             if let Some(x_tick) = x.tick(&x_value) {
-                if let Some(max_y) = y.tick(&max_price_value) {
-                    // marker_x 是K线的中心位置
-                    let marker_x = x_tick + band_width / 2.0;
-                    let arrow_size = 8.0;
-                    let arrow_offset = 15.0; // 箭头与价格点的距离
+                // 确保x_tick在图表区域内（不小于y_label_width）
+                if x_tick >= y_label_width {
+                    if let Some(max_y) = y.tick(&max_price_value) {
+                        // marker_x 是K线的中心位置
+                        let marker_x = x_tick + band_width / 2.0;
+                        let arrow_size = 8.0;
+                        let arrow_offset = 15.0; // 箭头与价格点的距离
 
-                    // 绘制向下指向的箭头（在最高点上方）
-                    let arrow_top_y = max_y - arrow_offset; // 箭头顶部在最高点上方
-                    let arrow_tip = origin_point(px(marker_x), px(max_y), origin); // 箭头尖端指向最高价
-                    let arrow_left =
-                        origin_point(px(marker_x - arrow_size / 2.0), px(arrow_top_y), origin);
-                    let arrow_right =
-                        origin_point(px(marker_x + arrow_size / 2.0), px(arrow_top_y), origin);
+                        // 绘制向下指向的箭头（在最高点上方）
+                        let arrow_top_y = max_y - arrow_offset; // 箭头顶部在最高点上方
+                        let arrow_tip = origin_point(px(marker_x), px(max_y), origin); // 箭头尖端指向最高价
+                        let arrow_left =
+                            origin_point(px(marker_x - arrow_size / 2.0), px(arrow_top_y), origin);
+                        let arrow_right =
+                            origin_point(px(marker_x + arrow_size / 2.0), px(arrow_top_y), origin);
 
-                    // 绘制箭头三角形（填充）
-                    let mut arrow_builder = PathBuilder::fill();
-                    arrow_builder.move_to(arrow_tip);
-                    arrow_builder.line_to(arrow_left);
-                    arrow_builder.line_to(arrow_right);
-                    arrow_builder.line_to(arrow_tip);
-                    if let Ok(arrow_path) = arrow_builder.build() {
-                        window.paint_path(arrow_path, Background::from(danger_color));
+                        // 绘制箭头三角形（填充）
+                        let mut arrow_builder = PathBuilder::fill();
+                        arrow_builder.move_to(arrow_tip);
+                        arrow_builder.line_to(arrow_left);
+                        arrow_builder.line_to(arrow_right);
+                        arrow_builder.line_to(arrow_tip);
+                        if let Ok(arrow_path) = arrow_builder.build() {
+                            window.paint_path(arrow_path, Background::from(danger_color));
+                        }
+
+                        // 绘制价格标签（在箭头上方）
+                        let label_text = format!("最高: {:.2}", max_price_value);
+                        let label_center_x = marker_x; // 使用K线中心
+                        let label_center_y = arrow_top_y - 15.0; // 标签在箭头上方，合适的距离
+                                                                 // 文本的origin.y是基线位置，为了垂直居中，需要稍微向下调整
+                        let text_baseline_y = label_center_y + 3.0;
+                        let price_label = Label::new(vec![Text {
+                            text: label_text.into(),
+                            origin: point(px(label_center_x), px(text_baseline_y)),
+                            color: danger_color,
+                            font_size: px(10.0),
+                            font_weight: gpui::FontWeight::SEMIBOLD,
+                            align: TextAlign::Center,
+                        }]);
+                        price_label.paint(&bounds, window, cx);
                     }
-
-                    // 绘制价格标签（在箭头上方）
-                    let label_text = format!("最高: {:.2}", max_price_value);
-                    let label_center_x = marker_x; // 使用K线中心
-                    let label_center_y = arrow_top_y - 15.0; // 标签在箭头上方，合适的距离
-                                                             // 文本的origin.y是基线位置，为了垂直居中，需要稍微向下调整
-                    let text_baseline_y = label_center_y + 3.0;
-                    let price_label = Label::new(vec![Text {
-                        text: label_text.into(),
-                        origin: point(px(label_center_x), px(text_baseline_y)),
-                        color: danger_color,
-                        font_size: px(10.0),
-                        font_weight: gpui::FontWeight::SEMIBOLD,
-                        align: TextAlign::Center,
-                    }]);
-                    price_label.paint(&bounds, window, cx);
                 }
             }
         }
@@ -734,59 +781,69 @@ where
             // 确保使用正确的数据来获取x_tick
             let x_value = x_fn(min_data);
             if let Some(x_tick) = x.tick(&x_value) {
-                if let Some(min_y) = y.tick(&min_price_value) {
-                    // marker_x 是K线的中心位置
-                    let marker_x = x_tick + band_width / 2.0;
-                    let arrow_size = 8.0;
+                // 确保x_tick在图表区域内（不小于y_label_width）
+                if x_tick >= y_label_width {
+                    if let Some(min_y) = y.tick(&min_price_value) {
+                        // marker_x 是K线的中心位置
+                        let marker_x = x_tick + band_width / 2.0;
+                        let arrow_size = 8.0;
 
-                    // 绘制向上指向的箭头（在最低点下方）
-                    // 参考最高价的样式：箭头与价格点的距离为15像素
-                    let arrow_offset = 15.0; // 箭头底部与最低价的距离（与最高价对称）
-                    let arrow_bottom_y = min_y + arrow_offset; // 箭头底部位置（最低价下方15像素）
-                    let arrow_tip = origin_point(px(marker_x), px(min_y), origin); // 箭头尖端指向最低价
-                    let arrow_left =
-                        origin_point(px(marker_x - arrow_size / 2.0), px(arrow_bottom_y), origin);
-                    let arrow_right =
-                        origin_point(px(marker_x + arrow_size / 2.0), px(arrow_bottom_y), origin);
+                        // 绘制向上指向的箭头（在最低点下方）
+                        // 参考最高价的样式：箭头与价格点的距离为15像素
+                        let arrow_offset = 15.0; // 箭头底部与最低价的距离（与最高价对称）
+                        let arrow_bottom_y = min_y + arrow_offset; // 箭头底部位置（最低价下方15像素）
+                        let arrow_tip = origin_point(px(marker_x), px(min_y), origin); // 箭头尖端指向最低价
+                        let arrow_left = origin_point(
+                            px(marker_x - arrow_size / 2.0),
+                            px(arrow_bottom_y),
+                            origin,
+                        );
+                        let arrow_right = origin_point(
+                            px(marker_x + arrow_size / 2.0),
+                            px(arrow_bottom_y),
+                            origin,
+                        );
 
-                    // 绘制箭头三角形（填充）
-                    let mut arrow_builder = PathBuilder::fill();
-                    arrow_builder.move_to(arrow_tip);
-                    arrow_builder.line_to(arrow_left);
-                    arrow_builder.line_to(arrow_right);
-                    arrow_builder.line_to(arrow_tip);
-                    if let Ok(arrow_path) = arrow_builder.build() {
-                        window.paint_path(arrow_path, Background::from(success_color));
+                        // 绘制箭头三角形（填充）
+                        let mut arrow_builder = PathBuilder::fill();
+                        arrow_builder.move_to(arrow_tip);
+                        arrow_builder.line_to(arrow_left);
+                        arrow_builder.line_to(arrow_right);
+                        arrow_builder.line_to(arrow_tip);
+                        if let Ok(arrow_path) = arrow_builder.build() {
+                            window.paint_path(arrow_path, Background::from(success_color));
+                        }
+
+                        // 绘制价格标签（在箭头下方）
+                        // 确保标签在箭头下方，有足够的距离
+                        let label_text = format!("最低: {:.2}", min_price_value);
+                        let label_center_x = marker_x; // 使用K线中心
+                        let text_baseline_y = arrow_bottom_y;
+                        let price_label = Label::new(vec![Text {
+                            text: label_text.into(),
+                            origin: point(px(label_center_x), px(text_baseline_y)),
+                            color: success_color,
+                            font_size: px(10.0),
+                            font_weight: gpui::FontWeight::SEMIBOLD,
+                            align: TextAlign::Center,
+                        }]);
+                        price_label.paint(&bounds, window, cx);
                     }
-
-                    // 绘制价格标签（在箭头下方）
-                    // 确保标签在箭头下方，有足够的距离
-                    let label_text = format!("最低: {:.2}", min_price_value);
-                    let label_center_x = marker_x; // 使用K线中心
-                    let text_baseline_y = arrow_bottom_y;
-                    let price_label = Label::new(vec![Text {
-                        text: label_text.into(),
-                        origin: point(px(label_center_x), px(text_baseline_y)),
-                        color: success_color,
-                        font_size: px(10.0),
-                        font_weight: gpui::FontWeight::SEMIBOLD,
-                        align: TextAlign::Center,
-                    }]);
-                    price_label.paint(&bounds, window, cx);
                 }
             }
         }
 
-        // 绘制最新价格标记（最后一根K线的收盘价）- 显示在Y轴标签区域内
+        // 绘制最新价格标记（最后一根K线的收盘价）- 显示在右侧Y轴标签区域内
         if let Some(latest_data) = self.data.last() {
             let latest_price = close_fn(latest_data);
             if let Some(latest_y) = y.tick(&latest_price) {
                 let arrow_size = 8.0;
                 let arrow_offset = 10.0; // 箭头与图表右边缘的距离
 
-                // 绘制向左指向的箭头（在Y轴标签区域内，指向最新价）
-                let arrow_left_x = width + arrow_offset; // 箭头左侧位置（在Y轴标签区域内）
-                let arrow_tip = origin_point(px(width), px(latest_y), origin); // 箭头尖端指向图表右边缘（最新价位置）
+                // 绘制向左指向的箭头（在右侧Y轴标签区域内，指向最新价）
+                let chart_right_edge = y_label_width + width; // 图表右边缘位置
+                let arrow_left_x = chart_right_edge + arrow_offset; // 箭头左侧位置（在右侧Y轴标签区域内）
+                let arrow_tip = origin_point(px(chart_right_edge), px(latest_y), origin); // 箭头尖端指向图表右边缘（最新价位置）
                 let arrow_top =
                     origin_point(px(arrow_left_x), px(latest_y - arrow_size / 2.0), origin);
                 let arrow_bottom =
@@ -840,29 +897,44 @@ where
 
             // 绘制水平线（从左到右）- 使用虚线
             let mut hline_builder = PathBuilder::stroke(px(1.5)).dash_array(&[px(4.0), px(2.0)]); // 虚线样式：4像素实线，2像素空白
-            let hline_start = origin_point(px(0.0), cy_pos, origin);
-            let hline_end = origin_point(px(width), cy_pos, origin);
+            let chart_left_edge = y_label_width; // 图表左边缘位置
+            let chart_right_edge = y_label_width + width; // 图表右边缘位置
+            let hline_start = origin_point(px(chart_left_edge), cy_pos, origin);
+            let hline_end = origin_point(px(chart_right_edge), cy_pos, origin);
             hline_builder.move_to(hline_start);
             hline_builder.line_to(hline_end);
             if let Ok(hline_path) = hline_builder.build() {
                 window.paint_path(hline_path, Background::from(cursor_color));
             }
 
-            // 在右侧显示当前价格（显示在Y轴标签区域内，右对齐）
+            // 在左右两侧显示当前价格
             let cy_pos_f32 = cy_pos.as_f32();
             let height_f32 = height;
             let ratio = 1.0 - cy_pos_f32 / height_f32;
             let current_price = domain_min + (domain_max - domain_min) * ratio as f64;
             let price_text = format!("{:.2}", current_price);
-            let price_label = Label::new(vec![Text {
+
+            // 左侧标签（左对齐）
+            let left_price_label = Label::new(vec![Text {
+                text: price_text.clone().into(),
+                origin: point(px(TEXT_GAP), cy_pos), // 左侧，左对齐
+                color: cursor_color,
+                font_size: px(12.0),
+                font_weight: gpui::FontWeight::SEMIBOLD,
+                align: TextAlign::Left,
+            }]);
+            left_price_label.paint(&bounds, window, cx);
+
+            // 右侧标签（右对齐）
+            let right_price_label = Label::new(vec![Text {
                 text: price_text.into(),
-                origin: point(px(total_width - TEXT_GAP), cy_pos), // 使用point，右对齐，显示在Y轴标签区域内
+                origin: point(px(total_width - TEXT_GAP), cy_pos), // 右侧，右对齐
                 color: cursor_color,
                 font_size: px(12.0),
                 font_weight: gpui::FontWeight::SEMIBOLD,
                 align: TextAlign::Right,
             }]);
-            price_label.paint(&bounds, window, cx);
+            right_price_label.paint(&bounds, window, cx);
 
             // 显示当前K线的详细信息
             if let Some(idx) = selected_index {
@@ -1148,20 +1220,19 @@ impl Element for VolumeChart {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // 与主图K线图保持一致：减去Y轴标签宽度，确保X轴对齐
+        // 与主图K线图保持一致：减去左右Y轴标签宽度，确保X轴对齐
         let total_width = bounds.size.width.as_f32();
-        let y_label_width = 50.0; // 与主图K线图一致
-        let chart_width = total_width - y_label_width; // 图表实际宽度（不包含Y轴标签区域）
+        let y_label_width = 50.0; // 与主图K线图一致（左右两侧各50）
+        let chart_width = total_width - y_label_width * 2.0; // 图表实际宽度（中间区域，不包含左右Y轴标签区域）
 
         let height = bounds.size.height.as_f32();
-        use gpui_component::plot::AXIS_GAP;
-        let chart_height = height - AXIS_GAP; // 图表区域高度（不包括X轴标签）
+        let chart_height = height; // 使用全部高度，不预留X轴标签空间
 
-        // X scale - 与主图一致
+        // X scale - 与主图一致，从左侧Y轴标签区域后开始
         let x_fn = |d: &StockData| d.date.clone();
         let x = ScaleBand::new(
             self.data.iter().map(|v| x_fn(v)).collect(),
-            vec![0., chart_width],
+            vec![y_label_width, y_label_width + chart_width],
         )
         .padding_inner(0.3)
         .padding_outer(0.1);
@@ -1271,36 +1342,75 @@ impl Element for VolumeChart {
         volume_labels.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let grid_y_positions: Vec<f32> = volume_labels.iter().map(|(_, grid_y)| *grid_y).collect();
 
-        // 绘制成交量Y轴标签
+        // 绘制成交量Y轴标签（左右两侧）
         let volume_label_items: Vec<Text> = volume_labels
-            .into_iter()
-            .map(|(t, actual_grid_y)| {
+            .iter()
+            .flat_map(|(t, actual_grid_y)| {
                 // Y轴标签的Y坐标使用取整后值对应的实际Y坐标，确保与网格线对齐
-                let y_tick_f32 = actual_grid_y;
+                let y_tick_f32 = *actual_grid_y;
                 // 确保Y坐标在图表绘制区域内（不超出bounds）
                 let clamped_y = y_tick_f32.max(10.0).min(chart_height);
                 // 文本的origin是基线位置（底部），需要调整Y坐标使文本中心与网格线对齐
                 let text_baseline_y = clamped_y - TEXT_SIZE / 2.0;
-                let y_label_x = total_width - TEXT_GAP;
-                Text {
-                    text: t.text,
-                    origin: point(px(y_label_x), px(text_baseline_y)), // Y坐标使文本中心与网格线对齐
+
+                // 左侧标签（左对齐）
+                let left_label = Text {
+                    text: t.text.clone(),
+                    origin: point(px(TEXT_GAP), px(text_baseline_y)), // 左侧，左对齐
+                    color: t.color,
+                    font_size: t.font_size,
+                    font_weight: gpui::FontWeight::NORMAL,
+                    align: TextAlign::Left,
+                };
+
+                // 右侧标签（右对齐）
+                let right_label = Text {
+                    text: t.text.clone(),
+                    origin: point(px(total_width - TEXT_GAP), px(text_baseline_y)), // 右侧，右对齐
                     color: t.color,
                     font_size: t.font_size,
                     font_weight: gpui::FontWeight::NORMAL,
                     align: TextAlign::Right,
-                }
+                };
+
+                vec![left_label, right_label]
             })
             .collect();
         let volume_label = Label::new(volume_label_items);
         volume_label.paint(&bounds, window, cx);
 
+        // 绘制Y轴标签区域与内容区域之间的分隔线（左右两侧）
+        let origin = bounds.origin;
+        let border_color = cx.theme().border;
+
+        // 左侧分隔线（Y轴标签区域右边缘）
+        let left_divider_x = y_label_width;
+        let mut left_divider_builder = PathBuilder::stroke(px(1.0));
+        let left_divider_start = origin_point(px(left_divider_x), px(0.0), origin);
+        let left_divider_end = origin_point(px(left_divider_x), px(height), origin);
+        left_divider_builder.move_to(left_divider_start);
+        left_divider_builder.line_to(left_divider_end);
+        if let Ok(left_divider_path) = left_divider_builder.build() {
+            window.paint_path(left_divider_path, Background::from(border_color));
+        }
+
+        // 右侧分隔线（Y轴标签区域左边缘）
+        let right_divider_x = y_label_width + chart_width;
+        let mut right_divider_builder = PathBuilder::stroke(px(1.0));
+        let right_divider_start = origin_point(px(right_divider_x), px(0.0), origin);
+        let right_divider_end = origin_point(px(right_divider_x), px(height), origin);
+        right_divider_builder.move_to(right_divider_start);
+        right_divider_builder.line_to(right_divider_end);
+        if let Ok(right_divider_path) = right_divider_builder.build() {
+            window.paint_path(right_divider_path, Background::from(border_color));
+        }
+
         // 绘制网格（不绘制X轴）- 网格线对应Y轴标签值，不超出Y轴标签区域
-        // 创建只包含图表区域的bounds（不包含Y轴标签区域）
+        // 创建只包含图表区域的bounds（不包含左右Y轴标签区域）
         let chart_bounds = gpui::Bounds {
-            origin: bounds.origin,
+            origin: origin_point(px(y_label_width), px(0.0), bounds.origin),
             size: gpui::Size {
-                width: px(chart_width), // 只使用图表宽度，不包含Y轴标签区域
+                width: px(chart_width), // 只使用图表宽度，不包含左右Y轴标签区域
                 height: bounds.size.height,
             },
         };
@@ -1310,31 +1420,51 @@ impl Element for VolumeChart {
             .dash_array(&[px(4.), px(2.)])
             .paint(&chart_bounds, window);
 
-        // 手动绘制柱状图（不绘制X轴标签）
+        // 手动绘制柱状图（不绘制X轴标签），确保不超出Y轴标签区域
         let success_color = cx.theme().success.opacity(0.7);
         let danger_color = cx.theme().danger.opacity(0.7);
-        use gpui_component::plot::shape::Bar;
-        let x_clone = x.clone(); // 克隆x用于闭包
-        let x_fn_clone = x_fn.clone(); // 克隆x_fn用于闭包
-        let bar = Bar::new()
-            .data(&self.data)
-            .band_width(band_width)
-            .x(move |d| x_clone.tick(&x_fn_clone(d)))
-            .y0(chart_height)
-            .y1(move |d| y.tick(&(d.volume as f64)))
-            .fill(move |d| {
-                if d.close > d.open {
-                    danger_color
-                } else {
-                    success_color
+        let origin = bounds.origin;
+
+        for d in &self.data {
+            if let Some(x_tick) = x.tick(&x_fn(d)) {
+                // 确保x_tick在图表区域内（不小于y_label_width）
+                if x_tick >= y_label_width {
+                    if let Some(volume_y) = y.tick(&(d.volume as f64)) {
+                        let bar_x = x_tick + band_width * 0.1;
+                        let bar_width = band_width * 0.8;
+                        let bar_top = volume_y.min(chart_height);
+                        let bar_bottom = chart_height;
+                        let bar_height = bar_bottom - bar_top;
+
+                        let color = if d.close > d.open {
+                            danger_color
+                        } else {
+                            success_color
+                        };
+
+                        let bar_bounds = gpui::Bounds {
+                            origin: origin_point(px(bar_x), px(bar_top), origin),
+                            size: gpui::Size {
+                                width: px(bar_width),
+                                height: px(bar_height),
+                            },
+                        };
+                        window.paint_quad(gpui::quad(
+                            bar_bounds,
+                            0.0,
+                            color,
+                            px(0.0),
+                            color,
+                            gpui::BorderStyle::default(),
+                        ));
+                    }
                 }
-            });
-        bar.paint(&bounds, window, cx);
+            }
+        }
 
         // 扩展检测范围：检测鼠标是否在K线图或成交量图的X坐标范围内
         // 不仅检测成交量图bounds，还要检测K线图的X坐标范围，以便联动
         let mouse_pos = window.mouse_position();
-        let origin = bounds.origin;
 
         let mut cursor_x = None;
 
@@ -1359,16 +1489,12 @@ impl Element for VolumeChart {
         }
 
         // 绘制竖线（与K线图的十字光标联动）
-        // 竖线只延伸到图表区域底部（X轴位置），不超出X轴标签区域
+        // 竖线延伸到图表区域底部
         if let Some(cx_pos) = cursor_x {
             let cursor_color = cx.theme().foreground.opacity(0.6);
-            // BarChart使用AXIS_GAP预留X轴标签空间，图表区域高度是 height - AXIS_GAP
-            // 竖线应该只延伸到图表区域底部（X轴位置）
-            use gpui_component::plot::AXIS_GAP;
-            let chart_height = height - AXIS_GAP; // 图表区域高度（不包括X轴标签）
             let mut vline_builder = PathBuilder::stroke(px(1.5)).dash_array(&[px(4.0), px(2.0)]); // 虚线样式：4像素实线，2像素空白
             let vline_start = origin_point(cx_pos, px(0.0), origin);
-            let vline_end = origin_point(cx_pos, px(chart_height), origin); // 只延伸到图表区域底部
+            let vline_end = origin_point(cx_pos, px(chart_height), origin); // 延伸到图表区域底部
             vline_builder.move_to(vline_start);
             vline_builder.line_to(vline_end);
             if let Ok(vline_path) = vline_builder.build() {
@@ -1462,21 +1588,20 @@ impl Element for MacdChart {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // 与主图K线图保持一致：减去Y轴标签宽度，确保X轴对齐
+        // 与主图K线图保持一致：减去左右Y轴标签宽度，确保X轴对齐
         let total_width = bounds.size.width.as_f32();
-        let y_label_width = 50.0; // 与主图K线图一致
-        let chart_width = total_width - y_label_width; // 图表实际宽度（不包含Y轴标签区域）
+        let y_label_width = 50.0; // 与主图K线图一致（左右两侧各50）
+        let chart_width = total_width - y_label_width * 2.0; // 图表实际宽度（中间区域，不包含左右Y轴标签区域）
 
         let origin = bounds.origin;
         let height = bounds.size.height.as_f32();
-        use gpui_component::plot::AXIS_GAP;
-        let chart_height = height - AXIS_GAP; // 图表区域高度（不包括X轴标签）
+        let chart_height = height; // 使用全部高度，不预留X轴标签空间
 
-        // X scale - 与主图一致
+        // X scale - 与主图一致，从左侧Y轴标签区域后开始
         let x_fn = |d: &StockData| d.date.clone();
         let x = ScaleBand::new(
             self.data.iter().map(|v| x_fn(v)).collect(),
-            vec![0., chart_width],
+            vec![y_label_width, y_label_width + chart_width],
         )
         .padding_inner(0.3)
         .padding_outer(0.1);
@@ -1515,34 +1640,37 @@ impl Element for MacdChart {
         for (i, d) in self.data.iter().enumerate() {
             if let Some(macd_val) = self.macd_data.macd.get(i).and_then(|v| *v) {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
-                    if let Some(macd_y) = y.tick(&macd_val) {
-                        let bar_x = x_tick + band_width * 0.1;
-                        let bar_width = band_width * 0.8;
-                        let bar_top = macd_y.min(zero_y);
-                        let bar_bottom = macd_y.max(zero_y);
-                        let bar_height = (bar_bottom - bar_top).abs();
+                    // 确保x_tick在图表区域内（不小于y_label_width）
+                    if x_tick >= y_label_width {
+                        if let Some(macd_y) = y.tick(&macd_val) {
+                            let bar_x = x_tick + band_width * 0.1;
+                            let bar_width = band_width * 0.8;
+                            let bar_top = macd_y.min(zero_y);
+                            let bar_bottom = macd_y.max(zero_y);
+                            let bar_height = (bar_bottom - bar_top).abs();
 
-                        let color = if macd_val >= 0.0 {
-                            danger_color // 正值用红色
-                        } else {
-                            success_color // 负值用绿色
-                        };
+                            let color = if macd_val >= 0.0 {
+                                danger_color // 正值用红色
+                            } else {
+                                success_color // 负值用绿色
+                            };
 
-                        let bar_bounds = gpui::Bounds {
-                            origin: origin_point(px(bar_x), px(bar_top), origin),
-                            size: gpui::Size {
-                                width: px(bar_width),
-                                height: px(bar_height),
-                            },
-                        };
-                        window.paint_quad(gpui::quad(
-                            bar_bounds,
-                            0.0,
-                            color,
-                            px(0.0),
-                            color,
-                            gpui::BorderStyle::default(),
-                        ));
+                            let bar_bounds = gpui::Bounds {
+                                origin: origin_point(px(bar_x), px(bar_top), origin),
+                                size: gpui::Size {
+                                    width: px(bar_width),
+                                    height: px(bar_height),
+                                },
+                            };
+                            window.paint_quad(gpui::quad(
+                                bar_bounds,
+                                0.0,
+                                color,
+                                px(0.0),
+                                color,
+                                gpui::BorderStyle::default(),
+                            ));
+                        }
                     }
                 }
             }
@@ -1556,13 +1684,17 @@ impl Element for MacdChart {
         for (i, d) in self.data.iter().enumerate() {
             if let Some(dif_val) = self.macd_data.dif.get(i).and_then(|v| *v) {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
-                    if let Some(dif_y) = y.tick(&dif_val) {
-                        let point = origin_point(px(x_tick + band_width / 2.0), px(dif_y), origin);
-                        if !has_dif_points {
-                            dif_builder.move_to(point);
-                            has_dif_points = true;
-                        } else {
-                            dif_builder.line_to(point);
+                    // 确保x_tick在图表区域内（不小于y_label_width）
+                    if x_tick >= y_label_width {
+                        if let Some(dif_y) = y.tick(&dif_val) {
+                            let point =
+                                origin_point(px(x_tick + band_width / 2.0), px(dif_y), origin);
+                            if !has_dif_points {
+                                dif_builder.move_to(point);
+                                has_dif_points = true;
+                            } else {
+                                dif_builder.line_to(point);
+                            }
                         }
                     }
                 }
@@ -1581,13 +1713,17 @@ impl Element for MacdChart {
         for (i, d) in self.data.iter().enumerate() {
             if let Some(dea_val) = self.macd_data.dea.get(i).and_then(|v| *v) {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
-                    if let Some(dea_y) = y.tick(&dea_val) {
-                        let point = origin_point(px(x_tick + band_width / 2.0), px(dea_y), origin);
-                        if !has_dea_points {
-                            dea_builder.move_to(point);
-                            has_dea_points = true;
-                        } else {
-                            dea_builder.line_to(point);
+                    // 确保x_tick在图表区域内（不小于y_label_width）
+                    if x_tick >= y_label_width {
+                        if let Some(dea_y) = y.tick(&dea_val) {
+                            let point =
+                                origin_point(px(x_tick + band_width / 2.0), px(dea_y), origin);
+                            if !has_dea_points {
+                                dea_builder.move_to(point);
+                                has_dea_points = true;
+                            } else {
+                                dea_builder.line_to(point);
+                            }
                         }
                     }
                 }
@@ -1602,8 +1738,10 @@ impl Element for MacdChart {
         // 绘制零轴线
         let zero_line_color = cx.theme().border;
         let mut zero_builder = PathBuilder::stroke(px(1.0));
-        let zero_start = origin_point(px(0.0), px(zero_y), origin);
-        let zero_end = origin_point(px(chart_width), px(zero_y), origin);
+        let chart_left_edge = y_label_width; // 图表左边缘位置
+        let chart_right_edge = y_label_width + chart_width; // 图表右边缘位置
+        let zero_start = origin_point(px(chart_left_edge), px(zero_y), origin);
+        let zero_end = origin_point(px(chart_right_edge), px(zero_y), origin);
         zero_builder.move_to(zero_start);
         zero_builder.line_to(zero_end);
         if let Ok(zero_path) = zero_builder.build() {
@@ -1654,36 +1792,75 @@ impl Element for MacdChart {
             .map(|label| label.tick.as_f32())
             .collect();
 
-        // 绘制MACD Y轴标签
+        // 绘制MACD Y轴标签（左右两侧）
         let macd_label_items: Vec<Text> = macd_labels
-            .into_iter()
-            .map(|t| {
+            .iter()
+            .flat_map(|t| {
                 // Y轴标签的Y坐标直接使用网格线的Y坐标，确保与网格线对齐
                 let y_tick_f32 = t.tick.as_f32();
                 // 确保Y坐标在图表绘制区域内（不超出bounds）
                 let clamped_y = y_tick_f32.max(10.0).min(chart_height);
                 // 文本的origin是基线位置（底部），需要调整Y坐标使文本中心与网格线对齐
                 let text_baseline_y = clamped_y - TEXT_SIZE / 2.0;
-                let y_label_x = total_width - TEXT_GAP;
-                Text {
-                    text: t.text,
-                    origin: point(px(y_label_x), px(text_baseline_y)), // Y坐标使文本中心与网格线对齐
+
+                // 左侧标签（左对齐）
+                let left_label = Text {
+                    text: t.text.clone(),
+                    origin: point(px(TEXT_GAP), px(text_baseline_y)), // 左侧，左对齐
+                    color: t.color,
+                    font_size: t.font_size,
+                    font_weight: gpui::FontWeight::NORMAL,
+                    align: TextAlign::Left,
+                };
+
+                // 右侧标签（右对齐）
+                let right_label = Text {
+                    text: t.text.clone(),
+                    origin: point(px(total_width - TEXT_GAP), px(text_baseline_y)), // 右侧，右对齐
                     color: t.color,
                     font_size: t.font_size,
                     font_weight: gpui::FontWeight::NORMAL,
                     align: TextAlign::Right,
-                }
+                };
+
+                vec![left_label, right_label]
             })
             .collect();
         let macd_label = Label::new(macd_label_items);
         macd_label.paint(&bounds, window, cx);
 
+        // 绘制Y轴标签区域与内容区域之间的分隔线（左右两侧）
+        let origin = bounds.origin;
+        let border_color = cx.theme().border;
+
+        // 左侧分隔线（Y轴标签区域右边缘）
+        let left_divider_x = y_label_width;
+        let mut left_divider_builder = PathBuilder::stroke(px(1.0));
+        let left_divider_start = origin_point(px(left_divider_x), px(0.0), origin);
+        let left_divider_end = origin_point(px(left_divider_x), px(height), origin);
+        left_divider_builder.move_to(left_divider_start);
+        left_divider_builder.line_to(left_divider_end);
+        if let Ok(left_divider_path) = left_divider_builder.build() {
+            window.paint_path(left_divider_path, Background::from(border_color));
+        }
+
+        // 右侧分隔线（Y轴标签区域左边缘）
+        let right_divider_x = y_label_width + chart_width;
+        let mut right_divider_builder = PathBuilder::stroke(px(1.0));
+        let right_divider_start = origin_point(px(right_divider_x), px(0.0), origin);
+        let right_divider_end = origin_point(px(right_divider_x), px(height), origin);
+        right_divider_builder.move_to(right_divider_start);
+        right_divider_builder.line_to(right_divider_end);
+        if let Ok(right_divider_path) = right_divider_builder.build() {
+            window.paint_path(right_divider_path, Background::from(border_color));
+        }
+
         // 绘制网格 - 网格线对应Y轴标签值，不超出Y轴标签区域
-        // 创建只包含图表区域的bounds（不包含Y轴标签区域）
+        // 创建只包含图表区域的bounds（不包含左右Y轴标签区域）
         let chart_bounds = gpui::Bounds {
-            origin: bounds.origin,
+            origin: origin_point(px(y_label_width), px(0.0), bounds.origin),
             size: gpui::Size {
-                width: px(chart_width), // 只使用图表宽度，不包含Y轴标签区域
+                width: px(chart_width), // 只使用图表宽度，不包含左右Y轴标签区域
                 height: bounds.size.height,
             },
         };
@@ -1693,40 +1870,7 @@ impl Element for MacdChart {
             .dash_array(&[px(4.), px(2.)])
             .paint(&chart_bounds, window);
 
-        // 绘制X轴（使用BarChart的Axis组件）
-        let data_len = self.data.len();
-        let x_label = self.data.iter().enumerate().filter_map(|(i, d)| {
-            if (i + 1) % 3 == 0 {
-                x.tick(&x_fn(d)).map(|x_tick| {
-                    let align = match i {
-                        0 => {
-                            if data_len == 1 {
-                                TextAlign::Center
-                            } else {
-                                TextAlign::Left
-                            }
-                        }
-                        i if i == data_len - 1 => TextAlign::Right,
-                        _ => TextAlign::Center,
-                    };
-                    AxisText::new(
-                        x_fn(d),
-                        x_tick + band_width / 2.,
-                        cx.theme().muted_foreground,
-                    )
-                    .align(align)
-                })
-            } else {
-                None
-            }
-        });
-
-        use gpui_component::plot::Axis;
-        Axis::new()
-            .x(chart_height)
-            .x_label(x_label)
-            .stroke(cx.theme().border)
-            .paint(&bounds, window, cx);
+        // 不再绘制X轴标签（取消X轴标签占位）
 
         // 绘制竖线（与K线图的十字光标联动）
         let mouse_pos = window.mouse_position();
