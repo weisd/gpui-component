@@ -167,6 +167,7 @@ where
     low: Option<Rc<dyn Fn(&T) -> f64>>,
     close: Option<Rc<dyn Fn(&T) -> f64>>,
     tick_margin: usize,
+    show_left_y_axis: bool, // 是否显示左侧Y轴标签区域
     // 十字光标状态（暂时不使用，但保留用于未来扩展）
     #[allow(dead_code)]
     mouse_x: Option<f32>,
@@ -193,10 +194,17 @@ where
             low: None,
             close: None,
             tick_margin: 1,
+            show_left_y_axis: false, // 默认显示左侧Y轴标签区域
             mouse_x: None,
             mouse_y: None,
             selected_index: None,
         }
+    }
+
+    /// 设置是否显示左侧Y轴标签区域
+    pub fn show_left_y_axis(mut self, show: bool) -> Self {
+        self.show_left_y_axis = show;
+        self
     }
 
     pub fn x(mut self, x: impl Fn(&T) -> X + 'static) -> Self {
@@ -250,15 +258,21 @@ where
         let total_height = bounds.size.height.as_f32();
         // 为Y轴标签单独分配空间，避免与K线重叠（左右两侧各分配空间）
         let y_label_width = 50.0; // Y轴标签区域宽度（左右两侧各50）
-        let width = total_width - y_label_width * 2.0; // K线图实际宽度（中间区域，不包含左右Y轴标签区域）
-                                                       // 为最低价标签预留底部空间，避免标签被裁剪c
+                                  // 根据是否显示左侧Y轴标签区域调整宽度计算
+        let left_y_axis_width = if self.show_left_y_axis {
+            y_label_width
+        } else {
+            0.0
+        };
+        let width = total_width - left_y_axis_width - y_label_width; // K线图实际宽度（中间区域，不包含左右Y轴标签区域）
+                                                                     // 为最低价标签预留底部空间，避免标签被裁剪c
         let bottom_margin = TEXT_SIZE + TEXT_GAP * 4.0; // 底部边距（文本高度 + 间距）
         let height = total_height - bottom_margin; // K线图实际高度（减去底部边距）
 
         // X scale - 使用 ScaleBand 以便蜡烛之间有间距，从左侧Y轴标签区域后开始
         let x = ScaleBand::new(
             self.data.iter().map(|v| x_fn(v)).collect(),
-            vec![y_label_width, y_label_width + width],
+            vec![left_y_axis_width, left_y_axis_width + width],
         )
         .padding_inner(0.3)
         .padding_outer(0.1);
@@ -472,15 +486,20 @@ where
                 // 文本的origin是基线位置（底部），需要调整Y坐标使文本中心与价格线对齐
                 let text_baseline_y = clamped_y - TEXT_SIZE / 2.0;
 
-                // 左侧标签（左对齐）
-                let left_label = Text {
-                    text: t.text.clone(),
-                    origin: point(px(TEXT_GAP), px(text_baseline_y)), // 左侧，左对齐
-                    color: t.color,
-                    font_size: t.font_size,
-                    font_weight: gpui::FontWeight::NORMAL,
-                    align: TextAlign::Left,
-                };
+                let mut labels = Vec::new();
+
+                // 左侧标签（仅在show_left_y_axis为true时添加）
+                if self.show_left_y_axis {
+                    let left_label = Text {
+                        text: t.text.clone(),
+                        origin: point(px(TEXT_GAP), px(text_baseline_y)), // 左侧，左对齐
+                        color: t.color,
+                        font_size: t.font_size,
+                        font_weight: gpui::FontWeight::NORMAL,
+                        align: TextAlign::Left,
+                    };
+                    labels.push(left_label);
+                }
 
                 // 右侧标签（右对齐）
                 let right_label = Text {
@@ -491,8 +510,9 @@ where
                     font_weight: gpui::FontWeight::NORMAL,
                     align: TextAlign::Right,
                 };
+                labels.push(right_label);
 
-                vec![left_label, right_label]
+                labels
             })
             .collect();
         let y_label = Label::new(y_label_items);
@@ -501,19 +521,22 @@ where
         // 绘制Y轴标签区域与内容区域之间的分隔线（左右两侧）
         let border_color = cx.theme().border;
 
-        // 左侧分隔线（Y轴标签区域右边缘）
-        let left_divider_x = y_label_width;
-        let mut left_divider_builder = PathBuilder::stroke(px(1.0));
-        let left_divider_start = origin_point(px(left_divider_x), px(0.0), bounds.origin);
-        let left_divider_end = origin_point(px(left_divider_x), px(total_height), bounds.origin);
-        left_divider_builder.move_to(left_divider_start);
-        left_divider_builder.line_to(left_divider_end);
-        if let Ok(left_divider_path) = left_divider_builder.build() {
-            window.paint_path(left_divider_path, Background::from(border_color));
+        // 左侧分隔线（仅在show_left_y_axis为true时绘制）
+        if self.show_left_y_axis {
+            let left_divider_x = left_y_axis_width;
+            let mut left_divider_builder = PathBuilder::stroke(px(1.0));
+            let left_divider_start = origin_point(px(left_divider_x), px(0.0), bounds.origin);
+            let left_divider_end =
+                origin_point(px(left_divider_x), px(total_height), bounds.origin);
+            left_divider_builder.move_to(left_divider_start);
+            left_divider_builder.line_to(left_divider_end);
+            if let Ok(left_divider_path) = left_divider_builder.build() {
+                window.paint_path(left_divider_path, Background::from(border_color));
+            }
         }
 
         // 右侧分隔线（Y轴标签区域左边缘）
-        let right_divider_x = y_label_width + width;
+        let right_divider_x = left_y_axis_width + width;
         let mut right_divider_builder = PathBuilder::stroke(px(1.0));
         let right_divider_start = origin_point(px(right_divider_x), px(0.0), bounds.origin);
         let right_divider_end = origin_point(px(right_divider_x), px(total_height), bounds.origin);
@@ -526,7 +549,7 @@ where
         // 绘制网格 - 网格线对应Y轴标签值，不超出Y轴标签区域
         // 创建只包含图表区域的bounds（不包含左右Y轴标签区域）
         let chart_bounds = gpui::Bounds {
-            origin: origin_point(px(y_label_width), px(0.0), bounds.origin),
+            origin: origin_point(px(left_y_axis_width), px(0.0), bounds.origin),
             size: gpui::Size {
                 width: px(width), // 只使用图表宽度，不包含左右Y轴标签区域
                 height: bounds.size.height,
@@ -561,8 +584,8 @@ where
             for (i, d) in self.data.iter().enumerate() {
                 if let Some(ma_value) = ma_values.get(i).and_then(|v| *v) {
                     if let Some(x_tick) = x.tick(&x_fn(d)) {
-                        // 确保x_tick在图表区域内（不小于y_label_width）
-                        if x_tick >= y_label_width {
+                        // 确保x_tick在图表区域内（不小于left_y_axis_width）
+                        if x_tick >= left_y_axis_width {
                             if let Some(ma_y_f32) = y.tick(&ma_value) {
                                 let ma_y = px(ma_y_f32);
                                 let point =
@@ -594,8 +617,8 @@ where
         for d in &self.data {
             let x_tick = x.tick(&x_fn(d));
             if let Some(x_tick) = x_tick {
-                // 确保x_tick在图表区域内（不小于y_label_width）
-                if x_tick < y_label_width {
+                // 确保x_tick在图表区域内（不小于left_y_axis_width）
+                if x_tick < left_y_axis_width {
                     continue;
                 }
 
@@ -731,8 +754,8 @@ where
             // 确保使用正确的数据来获取x_tick
             let x_value = x_fn(max_data);
             if let Some(x_tick) = x.tick(&x_value) {
-                // 确保x_tick在图表区域内（不小于y_label_width）
-                if x_tick >= y_label_width {
+                // 确保x_tick在图表区域内（不小于left_y_axis_width）
+                if x_tick >= left_y_axis_width {
                     if let Some(max_y) = y.tick(&max_price_value) {
                         // marker_x 是K线的中心位置
                         let marker_x = x_tick + band_width / 2.0;
@@ -781,8 +804,8 @@ where
             // 确保使用正确的数据来获取x_tick
             let x_value = x_fn(min_data);
             if let Some(x_tick) = x.tick(&x_value) {
-                // 确保x_tick在图表区域内（不小于y_label_width）
-                if x_tick >= y_label_width {
+                // 确保x_tick在图表区域内（不小于left_y_axis_width）
+                if x_tick >= left_y_axis_width {
                     if let Some(min_y) = y.tick(&min_price_value) {
                         // marker_x 是K线的中心位置
                         let marker_x = x_tick + band_width / 2.0;
@@ -841,7 +864,7 @@ where
                 let arrow_offset = 10.0; // 箭头与图表右边缘的距离
 
                 // 绘制向左指向的箭头（在右侧Y轴标签区域内，指向最新价）
-                let chart_right_edge = y_label_width + width; // 图表右边缘位置
+                let chart_right_edge = left_y_axis_width + width; // 图表右边缘位置
                 let arrow_left_x = chart_right_edge + arrow_offset; // 箭头左侧位置（在右侧Y轴标签区域内）
                 let arrow_tip = origin_point(px(chart_right_edge), px(latest_y), origin); // 箭头尖端指向图表右边缘（最新价位置）
                 let arrow_top =
@@ -897,8 +920,8 @@ where
 
             // 绘制水平线（从左到右）- 使用虚线
             let mut hline_builder = PathBuilder::stroke(px(1.5)).dash_array(&[px(4.0), px(2.0)]); // 虚线样式：4像素实线，2像素空白
-            let chart_left_edge = y_label_width; // 图表左边缘位置
-            let chart_right_edge = y_label_width + width; // 图表右边缘位置
+            let chart_left_edge = left_y_axis_width; // 图表左边缘位置
+            let chart_right_edge = left_y_axis_width + width; // 图表右边缘位置
             let hline_start = origin_point(px(chart_left_edge), cy_pos, origin);
             let hline_end = origin_point(px(chart_right_edge), cy_pos, origin);
             hline_builder.move_to(hline_start);
@@ -914,16 +937,18 @@ where
             let current_price = domain_min + (domain_max - domain_min) * ratio as f64;
             let price_text = format!("{:.2}", current_price);
 
-            // 左侧标签（左对齐）
-            let left_price_label = Label::new(vec![Text {
-                text: price_text.clone().into(),
-                origin: point(px(TEXT_GAP), cy_pos), // 左侧，左对齐
-                color: cursor_color,
-                font_size: px(12.0),
-                font_weight: gpui::FontWeight::SEMIBOLD,
-                align: TextAlign::Left,
-            }]);
-            left_price_label.paint(&bounds, window, cx);
+            // 左侧标签（仅在show_left_y_axis为true时显示）
+            if self.show_left_y_axis {
+                let left_price_label = Label::new(vec![Text {
+                    text: price_text.clone().into(),
+                    origin: point(px(TEXT_GAP), cy_pos), // 左侧，左对齐
+                    color: cursor_color,
+                    font_size: px(12.0),
+                    font_weight: gpui::FontWeight::SEMIBOLD,
+                    align: TextAlign::Left,
+                }]);
+                left_price_label.paint(&bounds, window, cx);
+            }
 
             // 右侧标签（右对齐）
             let right_price_label = Label::new(vec![Text {
@@ -1157,11 +1182,21 @@ where
 // 成交量图组件（带十字光标联动）
 struct VolumeChart {
     data: Vec<StockData>,
+    show_left_y_axis: bool, // 是否显示左侧Y轴标签区域
 }
 
 impl VolumeChart {
     fn new(_data: Vec<StockData>, _success_color: Hsla, _danger_color: Hsla) -> Self {
-        Self { data: _data }
+        Self {
+            data: _data,
+            show_left_y_axis: false, // 默认与主图保持一致
+        }
+    }
+
+    /// 设置是否显示左侧Y轴标签区域
+    pub fn show_left_y_axis(mut self, show: bool) -> Self {
+        self.show_left_y_axis = show;
+        self
     }
 }
 
@@ -1222,8 +1257,14 @@ impl Element for VolumeChart {
     ) {
         // 与主图K线图保持一致：减去左右Y轴标签宽度，确保X轴对齐
         let total_width = bounds.size.width.as_f32();
-        let y_label_width = 50.0; // 与主图K线图一致（左右两侧各50）
-        let chart_width = total_width - y_label_width * 2.0; // 图表实际宽度（中间区域，不包含左右Y轴标签区域）
+        let y_label_width = 50.0; // Y轴标签区域宽度（左右两侧各50）
+                                  // 根据是否显示左侧Y轴标签区域调整宽度计算
+        let left_y_axis_width = if self.show_left_y_axis {
+            y_label_width
+        } else {
+            0.0
+        };
+        let chart_width = total_width - left_y_axis_width - y_label_width; // 图表实际宽度（中间区域，不包含左右Y轴标签区域）
 
         let height = bounds.size.height.as_f32();
         let chart_height = height; // 使用全部高度，不预留X轴标签空间
@@ -1232,7 +1273,7 @@ impl Element for VolumeChart {
         let x_fn = |d: &StockData| d.date.clone();
         let x = ScaleBand::new(
             self.data.iter().map(|v| x_fn(v)).collect(),
-            vec![y_label_width, y_label_width + chart_width],
+            vec![left_y_axis_width, left_y_axis_width + chart_width],
         )
         .padding_inner(0.3)
         .padding_outer(0.1);
@@ -1353,15 +1394,20 @@ impl Element for VolumeChart {
                 // 文本的origin是基线位置（底部），需要调整Y坐标使文本中心与网格线对齐
                 let text_baseline_y = clamped_y - TEXT_SIZE / 2.0;
 
-                // 左侧标签（左对齐）
-                let left_label = Text {
-                    text: t.text.clone(),
-                    origin: point(px(TEXT_GAP), px(text_baseline_y)), // 左侧，左对齐
-                    color: t.color,
-                    font_size: t.font_size,
-                    font_weight: gpui::FontWeight::NORMAL,
-                    align: TextAlign::Left,
-                };
+                let mut labels = Vec::new();
+
+                // 左侧标签（仅在show_left_y_axis为true时添加）
+                if self.show_left_y_axis {
+                    let left_label = Text {
+                        text: t.text.clone(),
+                        origin: point(px(TEXT_GAP), px(text_baseline_y)), // 左侧，左对齐
+                        color: t.color,
+                        font_size: t.font_size,
+                        font_weight: gpui::FontWeight::NORMAL,
+                        align: TextAlign::Left,
+                    };
+                    labels.push(left_label);
+                }
 
                 // 右侧标签（右对齐）
                 let right_label = Text {
@@ -1372,8 +1418,9 @@ impl Element for VolumeChart {
                     font_weight: gpui::FontWeight::NORMAL,
                     align: TextAlign::Right,
                 };
+                labels.push(right_label);
 
-                vec![left_label, right_label]
+                labels
             })
             .collect();
         let volume_label = Label::new(volume_label_items);
@@ -1383,19 +1430,21 @@ impl Element for VolumeChart {
         let origin = bounds.origin;
         let border_color = cx.theme().border;
 
-        // 左侧分隔线（Y轴标签区域右边缘）
-        let left_divider_x = y_label_width;
-        let mut left_divider_builder = PathBuilder::stroke(px(1.0));
-        let left_divider_start = origin_point(px(left_divider_x), px(0.0), origin);
-        let left_divider_end = origin_point(px(left_divider_x), px(height), origin);
-        left_divider_builder.move_to(left_divider_start);
-        left_divider_builder.line_to(left_divider_end);
-        if let Ok(left_divider_path) = left_divider_builder.build() {
-            window.paint_path(left_divider_path, Background::from(border_color));
+        // 左侧分隔线（仅在show_left_y_axis为true时绘制）
+        if self.show_left_y_axis {
+            let left_divider_x = left_y_axis_width;
+            let mut left_divider_builder = PathBuilder::stroke(px(1.0));
+            let left_divider_start = origin_point(px(left_divider_x), px(0.0), origin);
+            let left_divider_end = origin_point(px(left_divider_x), px(height), origin);
+            left_divider_builder.move_to(left_divider_start);
+            left_divider_builder.line_to(left_divider_end);
+            if let Ok(left_divider_path) = left_divider_builder.build() {
+                window.paint_path(left_divider_path, Background::from(border_color));
+            }
         }
 
         // 右侧分隔线（Y轴标签区域左边缘）
-        let right_divider_x = y_label_width + chart_width;
+        let right_divider_x = left_y_axis_width + chart_width;
         let mut right_divider_builder = PathBuilder::stroke(px(1.0));
         let right_divider_start = origin_point(px(right_divider_x), px(0.0), origin);
         let right_divider_end = origin_point(px(right_divider_x), px(height), origin);
@@ -1408,7 +1457,7 @@ impl Element for VolumeChart {
         // 绘制网格（不绘制X轴）- 网格线对应Y轴标签值，不超出Y轴标签区域
         // 创建只包含图表区域的bounds（不包含左右Y轴标签区域）
         let chart_bounds = gpui::Bounds {
-            origin: origin_point(px(y_label_width), px(0.0), bounds.origin),
+            origin: origin_point(px(left_y_axis_width), px(0.0), bounds.origin),
             size: gpui::Size {
                 width: px(chart_width), // 只使用图表宽度，不包含左右Y轴标签区域
                 height: bounds.size.height,
@@ -1427,8 +1476,8 @@ impl Element for VolumeChart {
 
         for d in &self.data {
             if let Some(x_tick) = x.tick(&x_fn(d)) {
-                // 确保x_tick在图表区域内（不小于y_label_width）
-                if x_tick >= y_label_width {
+                // 确保x_tick在图表区域内（不小于left_y_axis_width）
+                if x_tick >= left_y_axis_width {
                     if let Some(volume_y) = y.tick(&(d.volume as f64)) {
                         let bar_x = x_tick + band_width * 0.1;
                         let bar_width = band_width * 0.8;
@@ -1524,12 +1573,23 @@ impl Element for VolumeChart {
 struct MacdChart {
     data: Vec<StockData>,
     macd_data: MacdData,
+    show_left_y_axis: bool, // 是否显示左侧Y轴标签区域
 }
 
 impl MacdChart {
     fn new(data: Vec<StockData>) -> Self {
         let macd_data = calculate_macd(&data, |d| d.close);
-        Self { data, macd_data }
+        Self {
+            data,
+            macd_data,
+            show_left_y_axis: false, // 默认与主图保持一致
+        }
+    }
+
+    /// 设置是否显示左侧Y轴标签区域
+    pub fn show_left_y_axis(mut self, show: bool) -> Self {
+        self.show_left_y_axis = show;
+        self
     }
 }
 
@@ -1590,8 +1650,14 @@ impl Element for MacdChart {
     ) {
         // 与主图K线图保持一致：减去左右Y轴标签宽度，确保X轴对齐
         let total_width = bounds.size.width.as_f32();
-        let y_label_width = 50.0; // 与主图K线图一致（左右两侧各50）
-        let chart_width = total_width - y_label_width * 2.0; // 图表实际宽度（中间区域，不包含左右Y轴标签区域）
+        let y_label_width = 50.0; // Y轴标签区域宽度（左右两侧各50）
+                                  // 根据是否显示左侧Y轴标签区域调整宽度计算
+        let left_y_axis_width = if self.show_left_y_axis {
+            y_label_width
+        } else {
+            0.0
+        };
+        let chart_width = total_width - left_y_axis_width - y_label_width; // 图表实际宽度（中间区域，不包含左右Y轴标签区域）
 
         let origin = bounds.origin;
         let height = bounds.size.height.as_f32();
@@ -1601,7 +1667,7 @@ impl Element for MacdChart {
         let x_fn = |d: &StockData| d.date.clone();
         let x = ScaleBand::new(
             self.data.iter().map(|v| x_fn(v)).collect(),
-            vec![y_label_width, y_label_width + chart_width],
+            vec![left_y_axis_width, left_y_axis_width + chart_width],
         )
         .padding_inner(0.3)
         .padding_outer(0.1);
@@ -1640,8 +1706,8 @@ impl Element for MacdChart {
         for (i, d) in self.data.iter().enumerate() {
             if let Some(macd_val) = self.macd_data.macd.get(i).and_then(|v| *v) {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
-                    // 确保x_tick在图表区域内（不小于y_label_width）
-                    if x_tick >= y_label_width {
+                    // 确保x_tick在图表区域内（不小于left_y_axis_width）
+                    if x_tick >= left_y_axis_width {
                         if let Some(macd_y) = y.tick(&macd_val) {
                             let bar_x = x_tick + band_width * 0.1;
                             let bar_width = band_width * 0.8;
@@ -1684,8 +1750,8 @@ impl Element for MacdChart {
         for (i, d) in self.data.iter().enumerate() {
             if let Some(dif_val) = self.macd_data.dif.get(i).and_then(|v| *v) {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
-                    // 确保x_tick在图表区域内（不小于y_label_width）
-                    if x_tick >= y_label_width {
+                    // 确保x_tick在图表区域内（不小于left_y_axis_width）
+                    if x_tick >= left_y_axis_width {
                         if let Some(dif_y) = y.tick(&dif_val) {
                             let point =
                                 origin_point(px(x_tick + band_width / 2.0), px(dif_y), origin);
@@ -1713,8 +1779,8 @@ impl Element for MacdChart {
         for (i, d) in self.data.iter().enumerate() {
             if let Some(dea_val) = self.macd_data.dea.get(i).and_then(|v| *v) {
                 if let Some(x_tick) = x.tick(&x_fn(d)) {
-                    // 确保x_tick在图表区域内（不小于y_label_width）
-                    if x_tick >= y_label_width {
+                    // 确保x_tick在图表区域内（不小于left_y_axis_width）
+                    if x_tick >= left_y_axis_width {
                         if let Some(dea_y) = y.tick(&dea_val) {
                             let point =
                                 origin_point(px(x_tick + band_width / 2.0), px(dea_y), origin);
@@ -1738,8 +1804,8 @@ impl Element for MacdChart {
         // 绘制零轴线
         let zero_line_color = cx.theme().border;
         let mut zero_builder = PathBuilder::stroke(px(1.0));
-        let chart_left_edge = y_label_width; // 图表左边缘位置
-        let chart_right_edge = y_label_width + chart_width; // 图表右边缘位置
+        let chart_left_edge = left_y_axis_width; // 图表左边缘位置
+        let chart_right_edge = left_y_axis_width + chart_width; // 图表右边缘位置
         let zero_start = origin_point(px(chart_left_edge), px(zero_y), origin);
         let zero_end = origin_point(px(chart_right_edge), px(zero_y), origin);
         zero_builder.move_to(zero_start);
@@ -1803,15 +1869,20 @@ impl Element for MacdChart {
                 // 文本的origin是基线位置（底部），需要调整Y坐标使文本中心与网格线对齐
                 let text_baseline_y = clamped_y - TEXT_SIZE / 2.0;
 
-                // 左侧标签（左对齐）
-                let left_label = Text {
-                    text: t.text.clone(),
-                    origin: point(px(TEXT_GAP), px(text_baseline_y)), // 左侧，左对齐
-                    color: t.color,
-                    font_size: t.font_size,
-                    font_weight: gpui::FontWeight::NORMAL,
-                    align: TextAlign::Left,
-                };
+                let mut labels = Vec::new();
+
+                // 左侧标签（仅在show_left_y_axis为true时添加）
+                if self.show_left_y_axis {
+                    let left_label = Text {
+                        text: t.text.clone(),
+                        origin: point(px(TEXT_GAP), px(text_baseline_y)), // 左侧，左对齐
+                        color: t.color,
+                        font_size: t.font_size,
+                        font_weight: gpui::FontWeight::NORMAL,
+                        align: TextAlign::Left,
+                    };
+                    labels.push(left_label);
+                }
 
                 // 右侧标签（右对齐）
                 let right_label = Text {
@@ -1822,8 +1893,9 @@ impl Element for MacdChart {
                     font_weight: gpui::FontWeight::NORMAL,
                     align: TextAlign::Right,
                 };
+                labels.push(right_label);
 
-                vec![left_label, right_label]
+                labels
             })
             .collect();
         let macd_label = Label::new(macd_label_items);
@@ -1833,19 +1905,21 @@ impl Element for MacdChart {
         let origin = bounds.origin;
         let border_color = cx.theme().border;
 
-        // 左侧分隔线（Y轴标签区域右边缘）
-        let left_divider_x = y_label_width;
-        let mut left_divider_builder = PathBuilder::stroke(px(1.0));
-        let left_divider_start = origin_point(px(left_divider_x), px(0.0), origin);
-        let left_divider_end = origin_point(px(left_divider_x), px(height), origin);
-        left_divider_builder.move_to(left_divider_start);
-        left_divider_builder.line_to(left_divider_end);
-        if let Ok(left_divider_path) = left_divider_builder.build() {
-            window.paint_path(left_divider_path, Background::from(border_color));
+        // 左侧分隔线（仅在show_left_y_axis为true时绘制）
+        if self.show_left_y_axis {
+            let left_divider_x = left_y_axis_width;
+            let mut left_divider_builder = PathBuilder::stroke(px(1.0));
+            let left_divider_start = origin_point(px(left_divider_x), px(0.0), origin);
+            let left_divider_end = origin_point(px(left_divider_x), px(height), origin);
+            left_divider_builder.move_to(left_divider_start);
+            left_divider_builder.line_to(left_divider_end);
+            if let Ok(left_divider_path) = left_divider_builder.build() {
+                window.paint_path(left_divider_path, Background::from(border_color));
+            }
         }
 
         // 右侧分隔线（Y轴标签区域左边缘）
-        let right_divider_x = y_label_width + chart_width;
+        let right_divider_x = left_y_axis_width + chart_width;
         let mut right_divider_builder = PathBuilder::stroke(px(1.0));
         let right_divider_start = origin_point(px(right_divider_x), px(0.0), origin);
         let right_divider_end = origin_point(px(right_divider_x), px(height), origin);
@@ -1858,7 +1932,7 @@ impl Element for MacdChart {
         // 绘制网格 - 网格线对应Y轴标签值，不超出Y轴标签区域
         // 创建只包含图表区域的bounds（不包含左右Y轴标签区域）
         let chart_bounds = gpui::Bounds {
-            origin: origin_point(px(y_label_width), px(0.0), bounds.origin),
+            origin: origin_point(px(left_y_axis_width), px(0.0), bounds.origin),
             size: gpui::Size {
                 width: px(chart_width), // 只使用图表宽度，不包含左右Y轴标签区域
                 height: bounds.size.height,
@@ -1922,7 +1996,91 @@ impl Element for MacdChart {
     }
 }
 
+// 统一的股票图表组件（包含主图和幅图）
+struct StockChart {
+    data: Vec<StockData>,
+    show_left_y_axis: bool, // 是否显示左侧Y轴标签区域（主图和幅图联动）
+}
+
+impl StockChart {
+    fn new(data: Vec<StockData>) -> Self {
+        Self {
+            data,
+            show_left_y_axis: false, // 默认不显示左侧Y轴标签区域
+        }
+    }
+
+    /// 设置是否显示左侧Y轴标签区域（主图和幅图联动）
+    pub fn show_left_y_axis(mut self, show: bool) -> Self {
+        self.show_left_y_axis = show;
+        self
+    }
+}
+
+impl IntoElement for StockChart {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for StockChart {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let style = Style {
+            size: gpui::Size::full(),
+            ..Default::default()
+        };
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Window,
+        _: &mut App,
+    ) -> Self::PrepaintState {
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        _: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        // 这个组件不直接绘制，而是通过子组件绘制
+        // 实际的绘制逻辑在子组件中
+    }
+}
+
 fn stock_chart(data: Vec<StockData>, cx: &mut Context<Example>) -> impl IntoElement {
+    // 统一的左侧Y轴显示开关（主图和幅图联动）
+    let show_left_y_axis = false;
+
     v_flex()
         .gap_4()
         .size_full()
@@ -1943,7 +2101,8 @@ fn stock_chart(data: Vec<StockData>, cx: &mut Context<Example>) -> impl IntoElem
                         .high(|d| d.high)
                         .low(|d| d.low)
                         .close(|d| d.close)
-                        .tick_margin(3),
+                        .tick_margin(3)
+                        .show_left_y_axis(show_left_y_axis), // 使用统一的开关
                 ),
         )
         .child({
@@ -1955,7 +2114,10 @@ fn stock_chart(data: Vec<StockData>, cx: &mut Context<Example>) -> impl IntoElem
                 .border_color(cx.theme().border)
                 .rounded_lg()
                 .p_4()
-                .child(VolumeChart::new(data.clone(), success_color, danger_color))
+                .child(
+                    VolumeChart::new(data.clone(), success_color, danger_color)
+                        .show_left_y_axis(show_left_y_axis), // 使用统一的开关
+                )
         })
         .child({
             div()
@@ -1964,7 +2126,9 @@ fn stock_chart(data: Vec<StockData>, cx: &mut Context<Example>) -> impl IntoElem
                 .border_color(cx.theme().border)
                 .rounded_lg()
                 .p_4()
-                .child(MacdChart::new(data))
+                .child(
+                    MacdChart::new(data).show_left_y_axis(show_left_y_axis), // 使用统一的开关
+                )
         })
 }
 
